@@ -27,9 +27,12 @@ import {
   FolderOpen,
   File,
   Check,
-  Copy
+  Copy,
+  PanelLeft,
+  PanelRight,
+  Paperclip
 } from './components/Icons';
-import { sendMessageStreamToGemini } from './services/geminiService';
+import { sendMessageStreamToGemini } from './api/geminiApi';
 import { processFileUpload, formatFileSize } from './services/fileService';
 import { AgentType, Message, SelectionState, AGENTS_CONFIG, User as UserType, Note, Conversation, UploadedFile } from './types';
 import { INITIAL_NOTE_CONTENT } from './constants';
@@ -282,6 +285,10 @@ function Workspace({ user, onLogout }: WorkspaceProps) {
   const [leftPanelWidth, setLeftPanelWidth] = useState<number>(50); // Percentage
   const [isResizing, setIsResizing] = useState(false);
   
+  // --- Layout Toggle State ---
+  const [isLeftOpen, setIsLeftOpen] = useState<boolean>(true);
+  const [isRightOpen, setIsRightOpen] = useState<boolean>(true);
+  
   // --- Chat & UI State (from active conversation) ---
   const [messages, setMessages] = useState<Message[]>([
     {
@@ -300,12 +307,15 @@ function Workspace({ user, onLogout }: WorkspaceProps) {
   const [selectedFileIds, setSelectedFileIds] = useState<string[]>([]); // Files selected for reference
   const [showFileSelector, setShowFileSelector] = useState(false); // Show file selector dropdown
   const [copySuccess, setCopySuccess] = useState(false); // Copy success feedback
+  const [pendingFiles, setPendingFiles] = useState<File[]>([]); // Files waiting to be uploaded (staging area)
+  const [isDragging, setIsDragging] = useState(false); // Drag and drop state
 
   const editorRef = useRef<HTMLDivElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const fileSelectorRef = useRef<HTMLDivElement>(null);
+  const chatContainerRef = useRef<HTMLDivElement>(null);
 
   // --- Conversation Management Functions ---
   const createNewConversation = () => {
@@ -375,13 +385,20 @@ function Workspace({ user, onLogout }: WorkspaceProps) {
   };
 
   // --- File Upload Functions ---
-  const handleFileUpload = async (files: FileList | null) => {
-    if (!files || files.length === 0 || !activeConversationId) return;
-    
+  // Add files to staging area (not immediately uploaded)
+  const handleFileSelect = (files: FileList | null) => {
+    if (!files || files.length === 0) return;
     const fileArray = Array.from(files);
+    setPendingFiles(prev => [...prev, ...fileArray]);
+  };
+
+  // Process and upload files from staging area
+  const processPendingFiles = async (filesToProcess: File[]) => {
+    if (filesToProcess.length === 0 || !activeConversationId) return [];
+    
     const processedFiles: UploadedFile[] = [];
     
-    for (const file of fileArray) {
+    for (const file of filesToProcess) {
       try {
         const uploadedFile = await processFileUpload(file, activeConversationId);
         processedFiles.push(uploadedFile);
@@ -396,6 +413,50 @@ function Workspace({ user, onLogout }: WorkspaceProps) {
       const allFiles = [...uploadedFiles, ...processedFiles];
       localStorage.setItem(`tf_files_${activeConversationId}`, JSON.stringify(allFiles));
     }
+    
+    return processedFiles;
+  };
+
+  // Remove file from staging area
+  const removePendingFile = (index: number) => {
+    setPendingFiles(prev => prev.filter((_, i) => i !== index));
+  };
+
+  // --- Drag and Drop Handlers ---
+  const handleDragEnter = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (e.dataTransfer.types.includes('Files')) {
+      setIsDragging(true);
+    }
+  };
+
+  const handleDragLeave = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    // Only hide overlay if we're leaving the chat container
+    if (chatContainerRef.current && !chatContainerRef.current.contains(e.relatedTarget as Node)) {
+      setIsDragging(false);
+    }
+  };
+
+  const handleDragOver = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (e.dataTransfer.types.includes('Files')) {
+      setIsDragging(true);
+    }
+  };
+
+  const handleDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragging(false);
+    
+    const files = e.dataTransfer.files;
+    if (files && files.length > 0) {
+      handleFileSelect(files);
+    }
   };
 
   const handleDeleteFile = (fileId: string) => {
@@ -408,6 +469,16 @@ function Workspace({ user, onLogout }: WorkspaceProps) {
 
   // --- Initialization ---
   useEffect(() => {
+    // Load layout preferences
+    const storedLeftOpen = localStorage.getItem('tf_layout_left_open');
+    const storedRightOpen = localStorage.getItem('tf_layout_right_open');
+    if (storedLeftOpen !== null) {
+      setIsLeftOpen(storedLeftOpen === 'true');
+    }
+    if (storedRightOpen !== null) {
+      setIsRightOpen(storedRightOpen === 'true');
+    }
+    
     // Load conversations
     const storedConversations = localStorage.getItem('tf_conversations');
     if (storedConversations) {
@@ -436,6 +507,15 @@ function Workspace({ user, onLogout }: WorkspaceProps) {
       }
     }
   }, [conversations, activeConversationId]);
+
+  // Save layout preferences
+  useEffect(() => {
+    localStorage.setItem('tf_layout_left_open', String(isLeftOpen));
+  }, [isLeftOpen]);
+
+  useEffect(() => {
+    localStorage.setItem('tf_layout_right_open', String(isRightOpen));
+  }, [isRightOpen]);
 
   // Update active conversation when notes or messages change
   useEffect(() => {
@@ -641,12 +721,12 @@ function Workspace({ user, onLogout }: WorkspaceProps) {
     const handleMouseMove = (e: MouseEvent) => {
       if (!isResizing) return;
       
-      const sidebarWidth = 256; // w-64 = 256px
+      const sidebarWidth = isLeftOpen ? 256 : 0; // w-64 = 256px
       const containerWidth = window.innerWidth - sidebarWidth;
-      const newLeftWidth = (e.clientX - sidebarWidth) / containerWidth * 100;
+      const newChatWidth = (e.clientX - sidebarWidth) / containerWidth * 100;
       
-      // Constrain between 20% and 80%
-      const constrainedWidth = Math.max(20, Math.min(80, newLeftWidth));
+      // Constrain between 20% and 80% (Chat panel width)
+      const constrainedWidth = Math.max(20, Math.min(80, newChatWidth));
       setLeftPanelWidth(constrainedWidth);
     };
 
@@ -949,13 +1029,27 @@ function Workspace({ user, onLogout }: WorkspaceProps) {
     handleAIStream(selectedAgent, prompt, childId);
   };
 
-  const handleSendMessage = (text?: string) => {
+  const handleSendMessage = async (text?: string) => {
     const msgText = text || inputVal;
-    if (!msgText.trim() && selectedFileIds.length === 0) return;
+    if (!msgText.trim() && selectedFileIds.length === 0 && pendingFiles.length === 0) return;
+    
+    // Process pending files first (upload them)
+    let newlyUploadedFileIds: string[] = [];
+    let newlyUploadedFiles: UploadedFile[] = [];
+    if (pendingFiles.length > 0) {
+      newlyUploadedFiles = await processPendingFiles(pendingFiles);
+      newlyUploadedFileIds = newlyUploadedFiles.map(f => f.id);
+      setPendingFiles([]); // Clear staging area after processing
+    }
+    
+    // Combine newly uploaded files with selected files
+    const allReferencedFileIds = [...selectedFileIds, ...newlyUploadedFileIds];
     
     // Get referenced files content
     const referencedFiles = uploadedFiles.filter(f => selectedFileIds.includes(f.id));
-    const filesContent = referencedFiles.map(f => 
+    const allReferencedFiles = [...referencedFiles, ...newlyUploadedFiles];
+    
+    const filesContent = allReferencedFiles.map(f => 
       `\n\n--- FILE: ${f.name} (${f.type.toUpperCase()}) ---\n${f.content.substring(0, 5000)}${f.content.length > 5000 ? '\n... (truncated)' : ''}`
     ).join('\n');
     
@@ -964,7 +1058,7 @@ function Workspace({ user, onLogout }: WorkspaceProps) {
       role: 'user',
       content: msgText,
       timestamp: Date.now(),
-      referencedFiles: selectedFileIds.length > 0 ? selectedFileIds : undefined
+      referencedFiles: allReferencedFileIds.length > 0 ? allReferencedFileIds : undefined
     };
     setMessages(prev => [...prev, userMsg]);
     setInputVal('');
@@ -1006,17 +1100,53 @@ function Workspace({ user, onLogout }: WorkspaceProps) {
   if (!activeNote) return <div>Loading...</div>;
 
   return (
-    <div className="flex h-screen w-full bg-white text-gray-900 font-sans overflow-hidden selection:bg-indigo-100 selection:text-indigo-900">
+    <div className="flex flex-col h-screen w-full bg-white text-gray-900 font-sans overflow-hidden selection:bg-indigo-100 selection:text-indigo-900">
       
-      {/* 1. Left Sidebar: Conversations + Navigation */}
-      <div className="w-64 bg-gray-50 border-r border-gray-200 flex flex-col h-full z-30 flex-shrink-0 shadow-sm">
-        {/* Logo/Header */}
-        <div className="h-14 border-b border-gray-200 flex items-center justify-center bg-white">
-          <div className="w-10 h-10 bg-black rounded-xl flex items-center justify-center shadow-lg">
-            <Brain className="text-white w-6 h-6" />
+      {/* Top Bar - Global Layout Controls */}
+      <div className="h-12 bg-white border-b border-gray-200 flex items-center justify-between px-4 z-50 flex-shrink-0 shadow-sm">
+        <div className="flex items-center gap-3">
+          <div className="w-8 h-8 bg-black rounded-lg flex items-center justify-center shadow-md">
+            <Brain className="text-white w-5 h-5" />
           </div>
+          <span className="text-sm font-bold text-gray-800">ThinkFlow</span>
         </div>
         
+        {/* Layout Toggle Buttons - Global */}
+        <div className="flex items-center gap-1 bg-gray-100 rounded-lg p-1">
+          <button
+            onClick={() => setIsLeftOpen(!isLeftOpen)}
+            className={`p-1.5 rounded transition-colors ${
+              isLeftOpen 
+                ? 'bg-white text-gray-900 shadow-sm' 
+                : 'text-gray-500 hover:text-gray-700'
+            }`}
+            title={isLeftOpen ? 'Hide Left Sidebar' : 'Show Left Sidebar'}
+          >
+            <PanelLeft className="w-4 h-4" />
+          </button>
+          <button
+            onClick={() => setIsRightOpen(!isRightOpen)}
+            className={`p-1.5 rounded transition-colors ${
+              isRightOpen 
+                ? 'bg-white text-gray-900 shadow-sm' 
+                : 'text-gray-500 hover:text-gray-700'
+            }`}
+            title={isRightOpen ? 'Hide Right Panel' : 'Show Right Panel'}
+          >
+            <PanelRight className="w-4 h-4" />
+          </button>
+        </div>
+      </div>
+
+      {/* Main Content Area */}
+      <div className="flex flex-1 overflow-hidden">
+      
+      {/* 1. Left Sidebar: Conversations + Navigation */}
+      <div 
+        className={`bg-gray-50 border-r border-gray-200 flex flex-col h-full z-30 flex-shrink-0 shadow-sm transition-all duration-500 ease-[cubic-bezier(0.4,0,0.2,1)] overflow-hidden will-change-[width,opacity] ${
+          isLeftOpen ? 'w-64 opacity-100' : 'w-0 opacity-0'
+        }`}
+      >
         {/* Conversations List */}
         <div className="flex-1 overflow-y-auto border-b border-gray-200">
           <div className="p-2">
@@ -1073,17 +1203,6 @@ function Workspace({ user, onLogout }: WorkspaceProps) {
              <Feather className="w-4 h-4"/>
              New Note
            </button>
-
-           <button 
-             onClick={() => setIsNotePanelOpen(!isNotePanelOpen)}
-             className={`w-full px-3 py-2 rounded-lg transition flex items-center justify-center gap-2 text-sm ${
-               !isNotePanelOpen ? 'bg-red-50 text-red-600' : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
-             }`}
-             title="Toggle Panel"
-           >
-             <FileText className="w-4 h-4"/>
-             {isNotePanelOpen ? 'Hide' : 'Show'} Panel
-           </button>
         </div>
         
         {/* User Profile */}
@@ -1104,11 +1223,314 @@ function Workspace({ user, onLogout }: WorkspaceProps) {
         </div>
       </div>
 
-      {/* 2. Left Panel: Canvas OR List */}
+      {/* 2. Main Chat Interface (Center) */}
+      {isRightOpen && (
+        <div 
+          className="flex flex-col relative bg-white min-w-0 border-r border-gray-200 shadow-[-5px_0_15px_-5px_rgba(0,0,0,0.05)] transition-all duration-500 ease-[cubic-bezier(0.4,0,0.2,1)] flex-1 will-change-[width]"
+          style={{ 
+            width: isNotePanelOpen && isLeftOpen 
+              ? `${leftPanelWidth}%`
+              : (isLeftOpen ? '100%' : '100%'),
+            transition: 'width 500ms cubic-bezier(0.4, 0, 0.2, 1)'
+          }}
+        >
+        
+        {/* Chat Header */}
+        <div className="h-14 flex items-center justify-between px-6 border-b border-gray-50">
+           <div className="flex items-center space-x-2">
+              <span className="text-lg font-semibold text-gray-800">ThinkFlow Chat</span>
+              <span className="px-2 py-0.5 bg-green-100 text-green-700 text-[10px] font-bold rounded-full tracking-wide">LIVE</span>
+           </div>
+        </div>
+
+        {/* Messages Container with Drag & Drop */}
+        <div 
+          ref={chatContainerRef}
+          className="flex-1 overflow-y-auto p-4 pb-32 bg-white relative"
+          onDragEnter={handleDragEnter}
+          onDragOver={handleDragOver}
+          onDragLeave={handleDragLeave}
+          onDrop={handleDrop}
+        >
+          {/* Drag Overlay */}
+          {isDragging && (
+            <div className="absolute inset-0 bg-indigo-50/90 border-4 border-dashed border-indigo-400 rounded-lg z-50 flex items-center justify-center">
+              <div className="text-center">
+                <Upload className="w-16 h-16 text-indigo-500 mx-auto mb-4" />
+                <p className="text-xl font-semibold text-indigo-700">Drop files here</p>
+                <p className="text-sm text-indigo-600 mt-2">Release to add files to your message</p>
+              </div>
+            </div>
+          )}
+           <div className="max-w-3xl mx-auto space-y-8">
+              {messages.map((msg) => {
+                const isUser = msg.role === 'user';
+                const agentConfig = msg.agent ? AGENTS_CONFIG[msg.agent] : AGENTS_CONFIG.Manager;
+                
+                return (
+                  <div key={msg.id} className={`flex ${isUser ? 'justify-end' : 'justify-start'} animate-in fade-in slide-in-from-bottom-2 duration-300`}>
+                    <div className={`flex flex-col max-w-[85%] ${isUser ? 'items-end' : 'items-start'}`}>
+                       
+                       {!isUser && (
+                         <div className="flex items-center space-x-2 mb-2">
+                            <div className={`w-6 h-6 rounded-full flex items-center justify-center shadow-sm ${agentConfig.color}`}>
+                              <Brain className="w-3 h-3 text-white" />
+                            </div>
+                            <span className="text-sm font-bold text-gray-800">{agentConfig.label}</span>
+                         </div>
+                       )}
+
+                       {/* Thought Log Display */}
+                       {!isUser && msg.thoughtLog && msg.thoughtLog.length > 0 && (
+                          <ThoughtLog logs={msg.thoughtLog} />
+                       )}
+
+                       {/* Referenced Files Display */}
+                       {isUser && msg.referencedFiles && msg.referencedFiles.length > 0 && (
+                         <div className="mb-2 flex flex-wrap gap-2">
+                           {msg.referencedFiles.map(fileId => {
+                             const file = uploadedFiles.find(f => f.id === fileId);
+                             if (!file) return null;
+                             return (
+                               <div key={fileId} className="px-2 py-1 bg-indigo-50 border border-indigo-200 rounded-md text-xs flex items-center gap-1.5">
+                                 <File className="w-3 h-3 text-indigo-600" />
+                                 <span className="text-indigo-700 font-medium">{file.name}</span>
+                               </div>
+                             );
+                           })}
+                         </div>
+                       )}
+                       
+                       <div className={`
+                         relative px-5 py-3.5 rounded-2xl text-sm leading-relaxed shadow-sm
+                         ${isUser 
+                           ? 'bg-gray-100 text-gray-900 rounded-br-none' 
+                           : 'bg-white border border-gray-200 text-gray-800 rounded-tl-none shadow-sm'
+                         }
+                       `}>
+                         <div className="whitespace-pre-wrap markdown-body">
+                            {msg.content}
+                            {msg.isStreaming && !msg.content && (
+                               <span className="inline-flex space-x-1 items-center h-4">
+                                 <span className="w-1.5 h-1.5 bg-gray-400 rounded-full animate-bounce" style={{animationDelay: '0ms'}}></span>
+                                 <span className="w-1.5 h-1.5 bg-gray-400 rounded-full animate-bounce" style={{animationDelay: '150ms'}}></span>
+                                 <span className="w-1.5 h-1.5 bg-gray-400 rounded-full animate-bounce" style={{animationDelay: '300ms'}}></span>
+                               </span>
+                            )}
+                         </div>
+                       </div>
+                    </div>
+                  </div>
+                );
+              })}
+              <div ref={messagesEndRef} />
+           </div>
+        </div>
+
+        {/* Input Area (Fixed Bottom) */}
+        <div className="absolute bottom-0 left-0 right-0 p-6 bg-gradient-to-t from-white via-white to-transparent pt-10">
+           <div className="max-w-3xl mx-auto">
+              
+              {/* Quick Prompts */}
+              {messages.length < 3 && (
+                <div className="flex justify-center space-x-2 mb-4">
+                   <HintPill text="Help me plan a project" icon={Target} onClick={() => handleSendMessage("Help me plan a project")} />
+                   <HintPill text="Explain this concept" icon={Lightbulb} onClick={() => handleSendMessage("Explain this concept simply")} />
+                   <HintPill text="Analyze my notes" icon={Search} onClick={() => handleSendMessage("Analyze the notes I have so far")} />
+                </div>
+              )}
+
+              {/* Pending Files Preview (Staging Area) */}
+              {pendingFiles.length > 0 && (
+                <div className="mb-2 flex flex-wrap gap-2">
+                  {pendingFiles.map((file, index) => (
+                    <div key={index} className="px-3 py-1.5 bg-indigo-100 border border-indigo-300 rounded-lg text-sm flex items-center gap-2">
+                      <File className="w-4 h-4 text-indigo-600" />
+                      <span className="text-indigo-700 font-medium">{file.name}</span>
+                      <button
+                        onClick={() => removePendingFile(index)}
+                        className="text-indigo-600 hover:text-indigo-800"
+                        title="Remove file"
+                      >
+                        <X className="w-3 h-3" />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {/* Selected Files Display (for referencing already uploaded files) */}
+              {selectedFileIds.length > 0 && (
+                <div className="mb-2 flex flex-wrap gap-2">
+                  {selectedFileIds.map(fileId => {
+                    const file = uploadedFiles.find(f => f.id === fileId);
+                    if (!file) return null;
+                    return (
+                      <div key={fileId} className="px-3 py-1.5 bg-indigo-100 border border-indigo-300 rounded-lg text-sm flex items-center gap-2">
+                        <File className="w-4 h-4 text-indigo-600" />
+                        <span className="text-indigo-700 font-medium">{file.name}</span>
+                        <button
+                          onClick={() => setSelectedFileIds(prev => prev.filter(id => id !== fileId))}
+                          className="text-indigo-600 hover:text-indigo-800"
+                        >
+                          <X className="w-3 h-3" />
+                        </button>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+
+              <div className="relative bg-white border border-gray-300 rounded-2xl shadow-lg focus-within:shadow-xl focus-within:border-indigo-500 transition-all">
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  multiple
+                  accept=".pdf,.txt,.md,.js,.ts,.jsx,.tsx,.py,.java,.cpp,.c,.cs,.php,.rb,.go,.rs,.swift,.kt,.html,.css,.scss,.less,.json,.xml,.yaml,.yml,.sql,.vue,.svelte"
+                  onChange={(e) => handleFileSelect(e.target.files)}
+                  className="hidden"
+                />
+
+                <textarea
+                  ref={inputRef}
+                  className="w-full bg-transparent border-none focus:ring-0 resize-none py-4 pl-4 pr-32 max-h-48 text-base text-gray-800 placeholder-gray-400"
+                  placeholder={`Ask ${activeAgent}...`}
+                  rows={1}
+                  value={inputVal}
+                  onChange={(e) => {
+                     setInputVal(e.target.value);
+                     e.target.style.height = 'auto';
+                     e.target.style.height = e.target.scrollHeight + 'px';
+                  }}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' && !e.shiftKey) {
+                      e.preventDefault();
+                      handleSendMessage();
+                    }
+                  }}
+                  onClick={() => setShowFileSelector(false)}
+                />
+                
+                {/* Right side buttons: File Reference, File Upload, Send */}
+                <div className="absolute right-3 bottom-3 flex items-center gap-1">
+                  {/* File Reference Button */}
+                  <div className="relative">
+                    <button
+                      onClick={() => setShowFileSelector(!showFileSelector)}
+                      className="p-1.5 text-gray-400 hover:text-indigo-600 hover:bg-indigo-50 rounded transition"
+                      title="Reference files"
+                    >
+                      <File className="w-5 h-5" />
+                    </button>
+                    
+                    {/* File Selector Dropdown */}
+                    {showFileSelector && (
+                      <div
+                        ref={fileSelectorRef}
+                        className="absolute bottom-full right-0 mb-2 w-80 bg-white border border-gray-200 rounded-lg shadow-xl z-50 max-h-64 overflow-y-auto"
+                      >
+                        <div className="p-2 border-b border-gray-100">
+                          <h4 className="text-xs font-semibold text-gray-700 px-2 py-1">Select files to reference</h4>
+                        </div>
+                        <div className="p-2 space-y-1">
+                          {uploadedFiles.length === 0 ? (
+                            <div className="px-3 py-4 text-center text-gray-400 text-sm">
+                              No files uploaded yet
+                            </div>
+                          ) : (
+                            uploadedFiles.map(file => {
+                              const isSelected = selectedFileIds.includes(file.id);
+                              return (
+                                <div
+                                  key={file.id}
+                                  onClick={() => {
+                                    if (isSelected) {
+                                      setSelectedFileIds(prev => prev.filter(id => id !== file.id));
+                                    } else {
+                                      setSelectedFileIds(prev => [...prev, file.id]);
+                                    }
+                                  }}
+                                  className={`p-2 rounded-lg cursor-pointer transition ${
+                                    isSelected
+                                      ? 'bg-indigo-50 border border-indigo-300'
+                                      : 'hover:bg-gray-50 border border-transparent'
+                                  }`}
+                                >
+                                  <div className="flex items-center gap-2">
+                                    <div className={`w-4 h-4 rounded border-2 flex items-center justify-center ${
+                                      isSelected ? 'bg-indigo-600 border-indigo-600' : 'border-gray-300'
+                                    }`}>
+                                      {isSelected && <Check className="w-3 h-3 text-white" />}
+                                    </div>
+                                    <File className="w-4 h-4 text-gray-500" />
+                                    <span className="text-sm text-gray-700 flex-1 truncate">{file.name}</span>
+                                  </div>
+                                </div>
+                              );
+                            })
+                          )}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* File Upload Button (Paperclip) */}
+                  <button
+                    onClick={() => fileInputRef.current?.click()}
+                    className="p-1.5 text-gray-400 hover:text-indigo-600 hover:bg-indigo-50 rounded transition"
+                    title="Upload files"
+                  >
+                    <Paperclip className="w-5 h-5" />
+                  </button>
+
+                  {/* Send Button */}
+                  <button 
+                    className={`p-2 rounded-xl transition-all duration-200 ${
+                      (inputVal.trim() || selectedFileIds.length > 0 || pendingFiles.length > 0) && !isThinking 
+                        ? 'bg-black text-white hover:bg-gray-800' 
+                        : 'bg-gray-100 text-gray-300 cursor-not-allowed'
+                    }`}
+                    onClick={() => handleSendMessage()}
+                    disabled={!inputVal.trim() && selectedFileIds.length === 0 && pendingFiles.length === 0 || isThinking}
+                  >
+                    <ArrowRight className="w-5 h-5" />
+                  </button>
+                </div>
+              </div>
+              <div className="text-center mt-3 text-xs text-gray-400">
+                 Gemini can make mistakes. Review generated notes.
+              </div>
+           </div>
+        </div>
+        </div>
+      )}
+
+      {/* Resize Handle */}
+      {isNotePanelOpen && isLeftOpen && isRightOpen && (
+        <div
+          onMouseDown={handleResizeMouseDown}
+          className={`w-1 bg-gray-200 hover:bg-indigo-400 cursor-col-resize transition-colors duration-200 ease-out z-40 ${isResizing ? 'bg-indigo-500' : ''}`}
+          style={{ flexShrink: 0 }}
+        />
+      )}
+
+      {/* 3. Right Panel: Canvas OR List */}
       {isNotePanelOpen && (
         <div 
-          className="bg-gray-50 border-r border-gray-200 flex flex-col h-full relative transition-all duration-300 ease-in-out"
-          style={{ width: `${leftPanelWidth}%` }}
+          className={`bg-gray-50 border-l border-gray-200 flex flex-col h-full relative transition-all duration-500 ease-[cubic-bezier(0.4,0,0.2,1)] will-change-[width,opacity] ${
+            !isRightOpen ? 'flex-1' : ''
+          }`}
+          style={{ 
+            width: isLeftOpen 
+              ? (isRightOpen ? `${100 - leftPanelWidth}%` : '100%')
+              : (isRightOpen ? '100%' : '100%'),
+            minWidth: isLeftOpen && isRightOpen ? '200px' : (isLeftOpen && !isRightOpen ? '0px' : '0px'),
+            maxWidth: isLeftOpen && isRightOpen ? '80%' : '100%',
+            opacity: (isLeftOpen || !isRightOpen) ? 1 : 0,
+            overflow: (isLeftOpen || !isRightOpen) ? 'visible' : 'hidden',
+            pointerEvents: (isLeftOpen || !isRightOpen) ? 'auto' : 'none',
+            transition: 'width 500ms cubic-bezier(0.4, 0, 0.2, 1), opacity 500ms cubic-bezier(0.4, 0, 0.2, 1)'
+          }}
         >
           
           {/* Panel Header with Tabs */}
@@ -1122,8 +1544,10 @@ function Workspace({ user, onLogout }: WorkspaceProps) {
                   {viewMode === 'canvas' ? 'Knowledge Graph' : viewMode === 'list' ? 'All Notes' : 'Files'}
                 </span>
               </div>
-              <div className="text-xs text-gray-400">
-                {viewMode === 'files' ? `${uploadedFiles.length} files` : `${notes.length} nodes`}
+              <div className="flex items-center gap-2">
+                <div className="text-xs text-gray-400">
+                  {viewMode === 'files' ? `${uploadedFiles.length} files` : `${notes.length} nodes`}
+                </div>
               </div>
             </div>
             {/* Tab Switcher */}
@@ -1186,32 +1610,13 @@ function Workspace({ user, onLogout }: WorkspaceProps) {
                 </div>
              ) : (
                 <div className="flex-1 flex flex-col overflow-hidden">
-                  {/* File Upload Area */}
-                  <div className="p-4 border-b border-gray-200">
-                    <input
-                      ref={fileInputRef}
-                      type="file"
-                      multiple
-                      accept=".pdf,.txt,.md,.js,.ts,.jsx,.tsx,.py,.java,.cpp,.c,.cs,.php,.rb,.go,.rs,.swift,.kt,.html,.css,.scss,.less,.json,.xml,.yaml,.yml,.sql,.vue,.svelte"
-                      onChange={(e) => handleFileUpload(e.target.files)}
-                      className="hidden"
-                    />
-                    <button
-                      onClick={() => fileInputRef.current?.click()}
-                      className="w-full px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 transition flex items-center justify-center gap-2 text-sm"
-                    >
-                      <Upload className="w-4 h-4" />
-                      Upload Files
-                    </button>
-                  </div>
-                  
                   {/* Files List */}
                   <div className="flex-1 overflow-y-auto p-4 space-y-2">
                     {uploadedFiles.length === 0 ? (
                       <div className="text-center text-gray-400 py-8">
                         <Folder className="w-12 h-12 mx-auto mb-2 opacity-50" />
                         <p className="text-sm">No files uploaded yet</p>
-                        <p className="text-xs mt-1">Click "Upload Files" to add documents</p>
+                        <p className="text-xs mt-1">Upload files from the chat input area</p>
                       </div>
                     ) : (
                       uploadedFiles.map(file => (
@@ -1350,229 +1755,14 @@ function Workspace({ user, onLogout }: WorkspaceProps) {
         </div>
       )}
 
-      {/* Resize Handle */}
-      {isNotePanelOpen && (
+      {/* Resize Handle - Between Chat and Canvas */}
+      {isNotePanelOpen && isLeftOpen && isRightOpen && (
         <div
           onMouseDown={handleResizeMouseDown}
-          className={`w-1 bg-gray-200 hover:bg-indigo-400 cursor-col-resize transition-colors z-40 ${isResizing ? 'bg-indigo-500' : ''}`}
+          className={`w-1 bg-gray-200 hover:bg-indigo-400 cursor-col-resize transition-colors duration-200 ease-out z-40 ${isResizing ? 'bg-indigo-500' : ''}`}
           style={{ flexShrink: 0 }}
         />
       )}
-
-      {/* 3. Main Chat Interface (Center/Right) */}
-      <div 
-        className="flex-1 flex flex-col relative bg-white min-w-0 border-l border-gray-200 shadow-[-5px_0_15px_-5px_rgba(0,0,0,0.05)]"
-        style={{ width: isNotePanelOpen ? `${100 - leftPanelWidth}%` : '100%' }}
-      >
-        
-        {/* Chat Header */}
-        <div className="h-14 flex items-center justify-between px-6 border-b border-gray-50">
-           <div className="flex items-center space-x-2">
-              <span className="text-lg font-semibold text-gray-800">ThinkFlow Chat</span>
-              <span className="px-2 py-0.5 bg-green-100 text-green-700 text-[10px] font-bold rounded-full tracking-wide">LIVE</span>
-           </div>
-        </div>
-
-        {/* Messages Container */}
-        <div className="flex-1 overflow-y-auto p-4 pb-32 bg-white">
-           <div className="max-w-3xl mx-auto space-y-8">
-              {messages.map((msg) => {
-                const isUser = msg.role === 'user';
-                const agentConfig = msg.agent ? AGENTS_CONFIG[msg.agent] : AGENTS_CONFIG.Manager;
-                
-                return (
-                  <div key={msg.id} className={`flex ${isUser ? 'justify-end' : 'justify-start'} animate-in fade-in slide-in-from-bottom-2 duration-300`}>
-                    <div className={`flex flex-col max-w-[85%] ${isUser ? 'items-end' : 'items-start'}`}>
-                       
-                       {!isUser && (
-                         <div className="flex items-center space-x-2 mb-2">
-                            <div className={`w-6 h-6 rounded-full flex items-center justify-center shadow-sm ${agentConfig.color}`}>
-                              <Brain className="w-3 h-3 text-white" />
-                            </div>
-                            <span className="text-sm font-bold text-gray-800">{agentConfig.label}</span>
-                         </div>
-                       )}
-
-                       {/* Thought Log Display */}
-                       {!isUser && msg.thoughtLog && msg.thoughtLog.length > 0 && (
-                          <ThoughtLog logs={msg.thoughtLog} />
-                       )}
-
-                       {/* Referenced Files Display */}
-                       {isUser && msg.referencedFiles && msg.referencedFiles.length > 0 && (
-                         <div className="mb-2 flex flex-wrap gap-2">
-                           {msg.referencedFiles.map(fileId => {
-                             const file = uploadedFiles.find(f => f.id === fileId);
-                             if (!file) return null;
-                             return (
-                               <div key={fileId} className="px-2 py-1 bg-indigo-50 border border-indigo-200 rounded-md text-xs flex items-center gap-1.5">
-                                 <File className="w-3 h-3 text-indigo-600" />
-                                 <span className="text-indigo-700 font-medium">{file.name}</span>
-                               </div>
-                             );
-                           })}
-                         </div>
-                       )}
-                       
-                       <div className={`
-                         relative px-5 py-3.5 rounded-2xl text-sm leading-relaxed shadow-sm
-                         ${isUser 
-                           ? 'bg-gray-100 text-gray-900 rounded-br-none' 
-                           : 'bg-white border border-gray-200 text-gray-800 rounded-tl-none shadow-sm'
-                         }
-                       `}>
-                         <div className="whitespace-pre-wrap markdown-body">
-                            {msg.content}
-                            {msg.isStreaming && !msg.content && (
-                               <span className="inline-flex space-x-1 items-center h-4">
-                                 <span className="w-1.5 h-1.5 bg-gray-400 rounded-full animate-bounce" style={{animationDelay: '0ms'}}></span>
-                                 <span className="w-1.5 h-1.5 bg-gray-400 rounded-full animate-bounce" style={{animationDelay: '150ms'}}></span>
-                                 <span className="w-1.5 h-1.5 bg-gray-400 rounded-full animate-bounce" style={{animationDelay: '300ms'}}></span>
-                               </span>
-                            )}
-                         </div>
-                       </div>
-                    </div>
-                  </div>
-                );
-              })}
-              <div ref={messagesEndRef} />
-           </div>
-        </div>
-
-        {/* Input Area (Fixed Bottom) */}
-        <div className="absolute bottom-0 left-0 right-0 p-6 bg-gradient-to-t from-white via-white to-transparent pt-10">
-           <div className="max-w-3xl mx-auto">
-              
-              {/* Quick Prompts */}
-              {messages.length < 3 && (
-                <div className="flex justify-center space-x-2 mb-4">
-                   <HintPill text="Help me plan a project" icon={Target} onClick={() => handleSendMessage("Help me plan a project")} />
-                   <HintPill text="Explain this concept" icon={Lightbulb} onClick={() => handleSendMessage("Explain this concept simply")} />
-                   <HintPill text="Analyze my notes" icon={Search} onClick={() => handleSendMessage("Analyze the notes I have so far")} />
-                </div>
-              )}
-
-              {/* Selected Files Display */}
-              {selectedFileIds.length > 0 && (
-                <div className="mb-2 flex flex-wrap gap-2">
-                  {selectedFileIds.map(fileId => {
-                    const file = uploadedFiles.find(f => f.id === fileId);
-                    if (!file) return null;
-                    return (
-                      <div key={fileId} className="px-3 py-1.5 bg-indigo-100 border border-indigo-300 rounded-lg text-sm flex items-center gap-2">
-                        <File className="w-4 h-4 text-indigo-600" />
-                        <span className="text-indigo-700 font-medium">{file.name}</span>
-                        <button
-                          onClick={() => setSelectedFileIds(prev => prev.filter(id => id !== fileId))}
-                          className="text-indigo-600 hover:text-indigo-800"
-                        >
-                          <X className="w-3 h-3" />
-                        </button>
-                      </div>
-                    );
-                  })}
-                </div>
-              )}
-
-              <div className="relative bg-white border border-gray-300 rounded-2xl shadow-lg focus-within:shadow-xl focus-within:border-indigo-500 transition-all">
-                {/* File Reference Button */}
-                <div className="relative">
-                  <button
-                    onClick={() => setShowFileSelector(!showFileSelector)}
-                    className="absolute left-3 top-1/2 -translate-y-1/2 p-1.5 text-gray-400 hover:text-indigo-600 hover:bg-indigo-50 rounded transition"
-                    title="Reference files"
-                  >
-                    <File className="w-5 h-5" />
-                  </button>
-                  
-                  {/* File Selector Dropdown */}
-                  {showFileSelector && (
-                    <div
-                      ref={fileSelectorRef}
-                      className="absolute bottom-full left-0 mb-2 w-80 bg-white border border-gray-200 rounded-lg shadow-xl z-50 max-h-64 overflow-y-auto"
-                    >
-                      <div className="p-2 border-b border-gray-100">
-                        <h4 className="text-xs font-semibold text-gray-700 px-2 py-1">Select files to reference</h4>
-                      </div>
-                      <div className="p-2 space-y-1">
-                        {uploadedFiles.length === 0 ? (
-                          <div className="px-3 py-4 text-center text-gray-400 text-sm">
-                            No files uploaded yet
-                          </div>
-                        ) : (
-                          uploadedFiles.map(file => {
-                            const isSelected = selectedFileIds.includes(file.id);
-                            return (
-                              <div
-                                key={file.id}
-                                onClick={() => {
-                                  if (isSelected) {
-                                    setSelectedFileIds(prev => prev.filter(id => id !== file.id));
-                                  } else {
-                                    setSelectedFileIds(prev => [...prev, file.id]);
-                                  }
-                                }}
-                                className={`p-2 rounded-lg cursor-pointer transition ${
-                                  isSelected
-                                    ? 'bg-indigo-50 border border-indigo-300'
-                                    : 'hover:bg-gray-50 border border-transparent'
-                                }`}
-                              >
-                                <div className="flex items-center gap-2">
-                                  <div className={`w-4 h-4 rounded border-2 flex items-center justify-center ${
-                                    isSelected ? 'bg-indigo-600 border-indigo-600' : 'border-gray-300'
-                                  }`}>
-                                    {isSelected && <Check className="w-3 h-3 text-white" />}
-                                  </div>
-                                  <File className="w-4 h-4 text-gray-500" />
-                                  <span className="text-sm text-gray-700 flex-1 truncate">{file.name}</span>
-                                </div>
-                              </div>
-                            );
-                          })
-                        )}
-                      </div>
-                    </div>
-                  )}
-                </div>
-
-                <textarea
-                  ref={inputRef}
-                  className="w-full bg-transparent border-none focus:ring-0 resize-none py-4 pl-12 pr-20 max-h-48 text-base text-gray-800 placeholder-gray-400"
-                  placeholder={`Ask ${activeAgent}...`}
-                  rows={1}
-                  value={inputVal}
-                  onChange={(e) => {
-                     setInputVal(e.target.value);
-                     e.target.style.height = 'auto';
-                     e.target.style.height = e.target.scrollHeight + 'px';
-                  }}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter' && !e.shiftKey) {
-                      e.preventDefault();
-                      handleSendMessage();
-                    }
-                  }}
-                  onClick={() => setShowFileSelector(false)}
-                />
-                <button 
-                  className={`absolute right-3 bottom-3 p-2 rounded-xl transition-all duration-200 ${
-                    (inputVal.trim() || selectedFileIds.length > 0) && !isThinking 
-                      ? 'bg-black text-white hover:bg-gray-800' 
-                      : 'bg-gray-100 text-gray-300 cursor-not-allowed'
-                  }`}
-                  onClick={() => handleSendMessage()}
-                  disabled={!inputVal.trim() && selectedFileIds.length === 0 || isThinking}
-                >
-                  <ArrowRight className="w-5 h-5" />
-                </button>
-              </div>
-              <div className="text-center mt-3 text-xs text-gray-400">
-                 Gemini can make mistakes. Review generated notes.
-              </div>
-           </div>
-        </div>
 
       </div>
     </div>
