@@ -31,6 +31,7 @@ export interface Message {
   thoughtLog?: string[]; // Parsed from the <thought> block
   timestamp: number;
   isStreaming?: boolean;
+  referencedFiles?: string[]; // IDs of referenced files
 }
 
 export interface SelectionState {
@@ -38,6 +39,31 @@ export interface SelectionState {
   x: number;
   y: number;
   text: string;
+}
+
+// Conversation/Session Management
+export interface Conversation {
+  id: string;
+  title: string;
+  createdAt: number;
+  updatedAt: number;
+  notes: Note[];
+  messages: Message[];
+}
+
+// File Upload Support
+export type FileType = 'pdf' | 'txt' | 'md' | 'code' | 'other';
+
+export interface UploadedFile {
+  id: string;
+  conversationId: string;
+  name: string;
+  type: FileType;
+  size: number;
+  content: string; // For text files, store content directly
+  fileUri?: string; // For Gemini File API uploaded files
+  uploadedAt: number;
+  mimeType: string;
 }
 
 export const AGENTS_CONFIG = {

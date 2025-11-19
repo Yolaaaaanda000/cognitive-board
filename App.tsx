@@ -21,10 +21,17 @@ import {
   FileText,
   Trash2,
   Network,
-  Download
+  Download,
+  Upload,
+  Folder,
+  FolderOpen,
+  File,
+  Check,
+  Copy
 } from './components/Icons';
 import { sendMessageStreamToGemini } from './services/geminiService';
-import { AgentType, Message, SelectionState, AGENTS_CONFIG, User as UserType, Note } from './types';
+import { processFileUpload, formatFileSize } from './services/fileService';
+import { AgentType, Message, SelectionState, AGENTS_CONFIG, User as UserType, Note, Conversation, UploadedFile } from './types';
 import { INITIAL_NOTE_CONTENT } from './constants';
 import AuthPage from './components/AuthPage';
 
@@ -91,9 +98,10 @@ interface CanvasViewProps {
   activeNoteId: string;
   onNoteClick: (id: string) => void;
   onNoteMove: (id: string, x: number, y: number) => void;
+  onNoteDelete: (id: string) => void;
 }
 
-const CanvasView: React.FC<CanvasViewProps> = ({ notes, activeNoteId, onNoteClick, onNoteMove }) => {
+const CanvasView: React.FC<CanvasViewProps> = ({ notes, activeNoteId, onNoteClick, onNoteMove, onNoteDelete }) => {
   const [isDragging, setIsDragging] = useState<string | null>(null);
   const [dragStart, setDragStart] = useState({ mouseX: 0, mouseY: 0, noteX: 0, noteY: 0 });
   const [scale, setScale] = useState(1);
@@ -190,7 +198,7 @@ const CanvasView: React.FC<CanvasViewProps> = ({ notes, activeNoteId, onNoteClic
         {notes.map(note => (
           <div
             key={note.id}
-            className={`absolute w-[200px] p-3 rounded-xl border shadow-sm bg-white transition-shadow hover:shadow-md z-10 cursor-pointer
+            className={`absolute w-[200px] p-3 rounded-xl border shadow-sm bg-white transition-shadow hover:shadow-md z-10 cursor-pointer group
               ${activeNoteId === note.id ? 'ring-2 ring-indigo-500 border-indigo-500' : 'border-gray-200'}
             `}
             style={{ left: note.x, top: note.y }}
@@ -209,8 +217,19 @@ const CanvasView: React.FC<CanvasViewProps> = ({ notes, activeNoteId, onNoteClic
             <p className="text-[10px] text-gray-400 line-clamp-3 pointer-events-none select-none">
               {note.content.replace(/<[^>]*>?/gm, '').substring(0, 50) || 'Empty note...'}
             </p>
+            {/* Delete Button - Shows on hover */}
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                onNoteDelete(note.id);
+              }}
+              className="absolute -top-2 -left-2 w-5 h-5 bg-red-500 hover:bg-red-600 text-white rounded-full flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity shadow-md z-20"
+              title="Delete Note"
+            >
+              <X className="w-3 h-3" />
+            </button>
             {/* Drag Handle Visual Hint */}
-            <div className="absolute -top-2 -right-2 w-4 h-4 bg-white border border-gray-200 rounded-full shadow cursor-move flex items-center justify-center opacity-0 hover:opacity-100 transition-opacity">
+            <div className="absolute -top-2 -right-2 w-4 h-4 bg-white border border-gray-200 rounded-full shadow cursor-move flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity">
                <div className="w-1 h-1 bg-gray-400 rounded-full"></div>
             </div>
           </div>
@@ -248,13 +267,22 @@ interface WorkspaceProps {
 }
 
 function Workspace({ user, onLogout }: WorkspaceProps) {
-  // --- Note State ---
+  // --- Conversation Management ---
+  const [conversations, setConversations] = useState<Conversation[]>([]);
+  const [activeConversationId, setActiveConversationId] = useState<string>('');
+  const [uploadedFiles, setUploadedFiles] = useState<UploadedFile[]>([]);
+  
+  // --- Note State (from active conversation) ---
   const [notes, setNotes] = useState<Note[]>([]);
   const [activeNoteId, setActiveNoteId] = useState<string>('');
   const [isNotePanelOpen, setIsNotePanelOpen] = useState(true);
-  const [viewMode, setViewMode] = useState<'list' | 'canvas'>('canvas');
+  const [viewMode, setViewMode] = useState<'list' | 'canvas' | 'files'>('canvas');
   
-  // --- Chat & UI State ---
+  // --- Panel Width State ---
+  const [leftPanelWidth, setLeftPanelWidth] = useState<number>(50); // Percentage
+  const [isResizing, setIsResizing] = useState(false);
+  
+  // --- Chat & UI State (from active conversation) ---
   const [messages, setMessages] = useState<Message[]>([
     {
       id: '1',
@@ -269,32 +297,150 @@ function Workspace({ user, onLogout }: WorkspaceProps) {
   const [isThinking, setIsThinking] = useState(false);
   const [activeAgent, setActiveAgent] = useState<AgentType>('Manager');
   const [isDetailViewOpen, setIsDetailViewOpen] = useState(false); // For detailed editing
+  const [selectedFileIds, setSelectedFileIds] = useState<string[]>([]); // Files selected for reference
+  const [showFileSelector, setShowFileSelector] = useState(false); // Show file selector dropdown
+  const [copySuccess, setCopySuccess] = useState(false); // Copy success feedback
 
   const editorRef = useRef<HTMLDivElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const fileSelectorRef = useRef<HTMLDivElement>(null);
 
-  // --- Initialization ---
-  useEffect(() => {
-    const storedNotes = localStorage.getItem('tf_notes');
-    if (storedNotes) {
-      const parsed = JSON.parse(storedNotes);
-      setNotes(parsed);
-      if (parsed.length > 0) {
-        setActiveNoteId(parsed[0].id);
+  // --- Conversation Management Functions ---
+  const createNewConversation = () => {
+    const newConv: Conversation = {
+      id: Date.now().toString(),
+      title: `对话 ${conversations.length + 1}`,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+      notes: [],
+      messages: [{
+        id: '1',
+        role: 'ai',
+        agent: 'Manager',
+        content: `Hello, ${user.name.split(' ')[0]}. I'm ThinkFlow. \n\nI can help you brainstorm, plan, or analyze complex topics. Notes are visualized as a knowledge graph on the left. \n\nWhat's on your mind?`,
+        timestamp: Date.now()
+      }]
+    };
+    setConversations(prev => [...prev, newConv]);
+    setActiveConversationId(newConv.id);
+    loadConversation(newConv.id);
+  };
+
+  const loadConversation = useCallback((conversationId: string, convList?: Conversation[]) => {
+    const convs = convList || conversations;
+    const conv = convs.find(c => c.id === conversationId);
+    if (conv) {
+      setNotes(conv.notes);
+      setMessages(conv.messages);
+      setActiveConversationId(conversationId);
+      if (conv.notes.length > 0) {
+        setActiveNoteId(conv.notes[0].id);
       } else {
         createDefaultNote();
       }
-    } else {
-      createDefaultNote();
+      // Load files for this conversation
+      const storedFiles = localStorage.getItem(`tf_files_${conversationId}`);
+      if (storedFiles) {
+        setUploadedFiles(JSON.parse(storedFiles));
+      } else {
+        setUploadedFiles([]);
+      }
     }
   }, []);
 
-  useEffect(() => {
-    if (notes.length > 0) {
-      localStorage.setItem('tf_notes', JSON.stringify(notes));
+  const deleteConversation = (conversationId: string) => {
+    setConversations(prev => prev.filter(c => c.id !== conversationId));
+    // Delete associated files
+    localStorage.removeItem(`tf_files_${conversationId}`);
+    // If deleting active conversation, switch to another
+    if (activeConversationId === conversationId) {
+      const remaining = conversations.filter(c => c.id !== conversationId);
+      if (remaining.length > 0) {
+        loadConversation(remaining[0].id);
+      } else {
+        createNewConversation();
+      }
     }
-  }, [notes]);
+  };
+
+  const updateActiveConversation = () => {
+    if (!activeConversationId) return;
+    setConversations(prev => prev.map(conv => 
+      conv.id === activeConversationId 
+        ? { ...conv, notes, messages, updatedAt: Date.now() }
+        : conv
+    ));
+  };
+
+  // --- File Upload Functions ---
+  const handleFileUpload = async (files: FileList | null) => {
+    if (!files || files.length === 0 || !activeConversationId) return;
+    
+    const fileArray = Array.from(files);
+    const processedFiles: UploadedFile[] = [];
+    
+    for (const file of fileArray) {
+      try {
+        const uploadedFile = await processFileUpload(file, activeConversationId);
+        processedFiles.push(uploadedFile);
+      } catch (error) {
+        console.error(`Error processing file ${file.name}:`, error);
+      }
+    }
+    
+    if (processedFiles.length > 0) {
+      setUploadedFiles(prev => [...prev, ...processedFiles]);
+      // Save to localStorage
+      const allFiles = [...uploadedFiles, ...processedFiles];
+      localStorage.setItem(`tf_files_${activeConversationId}`, JSON.stringify(allFiles));
+    }
+  };
+
+  const handleDeleteFile = (fileId: string) => {
+    const updatedFiles = uploadedFiles.filter(f => f.id !== fileId);
+    setUploadedFiles(updatedFiles);
+    if (activeConversationId) {
+      localStorage.setItem(`tf_files_${activeConversationId}`, JSON.stringify(updatedFiles));
+    }
+  };
+
+  // --- Initialization ---
+  useEffect(() => {
+    // Load conversations
+    const storedConversations = localStorage.getItem('tf_conversations');
+    if (storedConversations) {
+      const parsed = JSON.parse(storedConversations);
+      setConversations(parsed);
+      const activeId = localStorage.getItem('tf_active_conversation_id');
+      if (activeId && parsed.find((c: Conversation) => c.id === activeId)) {
+        loadConversation(activeId, parsed);
+      } else if (parsed.length > 0) {
+        loadConversation(parsed[0].id, parsed);
+      } else {
+        createNewConversation();
+      }
+    } else {
+      // First time: create default conversation
+      createNewConversation();
+    }
+  }, []);
+
+  // Save conversations and active conversation ID
+  useEffect(() => {
+    if (conversations.length > 0) {
+      localStorage.setItem('tf_conversations', JSON.stringify(conversations));
+      if (activeConversationId) {
+        localStorage.setItem('tf_active_conversation_id', activeConversationId);
+      }
+    }
+  }, [conversations, activeConversationId]);
+
+  // Update active conversation when notes or messages change
+  useEffect(() => {
+    updateActiveConversation();
+  }, [notes, messages]);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -304,6 +450,62 @@ function Workspace({ user, onLogout }: WorkspaceProps) {
     // Focus input on mount
     inputRef.current?.focus();
   }, []);
+
+  // Close file selector when clicking outside
+  useEffect(() => {
+    const handleClickOutside = (event: MouseEvent) => {
+      if (fileSelectorRef.current && !fileSelectorRef.current.contains(event.target as Node)) {
+        setShowFileSelector(false);
+      }
+    };
+
+    if (showFileSelector) {
+      document.addEventListener('mousedown', handleClickOutside);
+    }
+
+    return () => {
+      document.removeEventListener('mousedown', handleClickOutside);
+    };
+  }, [showFileSelector]);
+
+  // Hide selection menu when clicking outside
+  useEffect(() => {
+    const handleClickOutside = (event: MouseEvent) => {
+      if (!selection.isVisible) return;
+      
+      const target = event.target as Node;
+      
+      // Check if click is on the menu itself
+      const menuElement = document.querySelector('[data-selection-menu]');
+      if (menuElement && menuElement.contains(target)) {
+        return; // Don't hide if clicking on menu
+      }
+      
+      // Hide if clicking outside the editor
+      if (editorRef.current && !editorRef.current.contains(target)) {
+        setSelection({ isVisible: false, x: 0, y: 0, text: '' });
+        return;
+      }
+      
+      // Check if selection is still valid
+      const sel = window.getSelection();
+      if (!sel || sel.isCollapsed) {
+        setSelection({ isVisible: false, x: 0, y: 0, text: '' });
+      }
+    };
+
+    if (selection.isVisible) {
+      // Use a small delay to allow menu clicks to register first
+      const timeoutId = setTimeout(() => {
+        document.addEventListener('mousedown', handleClickOutside);
+      }, 100);
+
+      return () => {
+        clearTimeout(timeoutId);
+        document.removeEventListener('mousedown', handleClickOutside);
+      };
+    }
+  }, [selection.isVisible]);
 
   // --- Note Management Handlers ---
 
@@ -334,8 +536,7 @@ function Workspace({ user, onLogout }: WorkspaceProps) {
     setIsDetailViewOpen(true);
   };
 
-  const handleDeleteNote = (e: React.MouseEvent, id: string) => {
-    e.stopPropagation();
+  const handleDeleteNote = (id: string) => {
     const updatedNotes = notes.filter(n => n.id !== id);
     setNotes(updatedNotes);
     if (activeNoteId === id) {
@@ -344,8 +545,8 @@ function Workspace({ user, onLogout }: WorkspaceProps) {
       } else {
         createDefaultNote(); 
       }
+      setIsDetailViewOpen(false);
     }
-    setIsDetailViewOpen(false);
   };
 
   const handleDownloadNotes = () => {
@@ -358,6 +559,56 @@ function Workspace({ user, onLogout }: WorkspaceProps) {
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
+  };
+
+  const handleDownloadNoteAsMarkdown = (note: Note) => {
+    // Convert HTML content to plain text (remove HTML tags)
+    const plainContent = note.content.replace(/<[^>]*>?/gm, '').trim();
+    
+    // Create markdown content
+    const markdown = `# ${note.title || 'Untitled'}\n\n${plainContent}\n\n---\n*Created: ${new Date(note.updatedAt).toLocaleString()}*`;
+    
+    const blob = new Blob([markdown], { type: "text/markdown" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    const safeTitle = (note.title || 'Untitled').replace(/[^a-z0-9]/gi, '_').toLowerCase();
+    link.download = `${safeTitle}_${new Date().toISOString().slice(0,10)}.md`;
+    link.href = url;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+  };
+
+  const handleCopyNote = async (note: Note) => {
+    // Convert HTML content to plain text (remove HTML tags)
+    const plainContent = note.content.replace(/<[^>]*>?/gm, '').trim();
+    
+    // Create markdown content for copying
+    const markdown = `# ${note.title || 'Untitled'}\n\n${plainContent}\n\n---\n*Created: ${new Date(note.updatedAt).toLocaleString()}*`;
+    
+    try {
+      await navigator.clipboard.writeText(markdown);
+      setCopySuccess(true);
+      setTimeout(() => setCopySuccess(false), 2000);
+    } catch (err) {
+      console.error('Failed to copy:', err);
+      // Fallback for older browsers
+      const textArea = document.createElement('textarea');
+      textArea.value = markdown;
+      textArea.style.position = 'fixed';
+      textArea.style.opacity = '0';
+      document.body.appendChild(textArea);
+      textArea.select();
+      try {
+        document.execCommand('copy');
+        setCopySuccess(true);
+        setTimeout(() => setCopySuccess(false), 2000);
+      } catch (fallbackErr) {
+        console.error('Fallback copy failed:', fallbackErr);
+      }
+      document.body.removeChild(textArea);
+    }
   };
 
   const updateActiveNote = (title?: string, content?: string) => {
@@ -379,6 +630,44 @@ function Workspace({ user, onLogout }: WorkspaceProps) {
   };
 
   const activeNote = notes.find(n => n.id === activeNoteId) || notes[0];
+
+  // --- Panel Resize Handlers ---
+  const handleResizeMouseDown = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    setIsResizing(true);
+  }, []);
+
+  useEffect(() => {
+    const handleMouseMove = (e: MouseEvent) => {
+      if (!isResizing) return;
+      
+      const sidebarWidth = 256; // w-64 = 256px
+      const containerWidth = window.innerWidth - sidebarWidth;
+      const newLeftWidth = (e.clientX - sidebarWidth) / containerWidth * 100;
+      
+      // Constrain between 20% and 80%
+      const constrainedWidth = Math.max(20, Math.min(80, newLeftWidth));
+      setLeftPanelWidth(constrainedWidth);
+    };
+
+    const handleMouseUp = () => {
+      setIsResizing(false);
+    };
+
+    if (isResizing) {
+      document.addEventListener('mousemove', handleMouseMove);
+      document.addEventListener('mouseup', handleMouseUp);
+      document.body.style.cursor = 'col-resize';
+      document.body.style.userSelect = 'none';
+    }
+
+    return () => {
+      document.removeEventListener('mousemove', handleMouseMove);
+      document.removeEventListener('mouseup', handleMouseUp);
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+    };
+  }, [isResizing]);
 
   // --- Spawning Logic ---
   
@@ -426,6 +715,7 @@ function Workspace({ user, onLogout }: WorkspaceProps) {
     // Initial Target ID (might change if dynamic branching occurs)
     let currentTargetId = targetNoteId || activeNoteId;
     let hasBranched = false;
+    let finalDetectedAgent: AgentType | null = null; // Track final detected agent
 
     try {
       const stream = sendMessageStreamToGemini(prompt);
@@ -459,16 +749,54 @@ function Workspace({ user, onLogout }: WorkspaceProps) {
         cleanContent = cleanContent.replace(branchTagRegex, '');
 
         let parsedThoughts: string[] = [];
+        let detectedAgent: AgentType | null = null; // Track if Manager selected a different agent
 
         const thoughtMatch = rawAccumulated.match(closedThoughtBlockRegex);
         
         if (thoughtMatch) {
-          parsedThoughts = thoughtMatch[1].split('\n').map(t => t.trim()).filter(t => t.length > 0);
+          const thoughtContent = thoughtMatch[1];
+          parsedThoughts = thoughtContent.split('\n').map(t => t.trim()).filter(t => t.length > 0);
           cleanContent = cleanContent.replace(closedThoughtBlockRegex, '');
+          
+          // If Manager is active, try to detect which agent it selected
+          if (agent === 'Manager') {
+            const agentNames: AgentType[] = ['Socrates', 'Feynman', 'Pareto', 'Elon'];
+            const thoughtText = thoughtContent.toLowerCase();
+            for (const agentName of agentNames) {
+              // Look for patterns like "act as X", "adopting X", "switching to X", "persona: X", etc.
+              const patterns = [
+                new RegExp(`(?:act|acting|adopt|adopting|switch|switching|use|using|select|selecting|choose|choosing).*?${agentName.toLowerCase()}`, 'i'),
+                new RegExp(`persona.*?:.*?${agentName.toLowerCase()}`, 'i'),
+                new RegExp(`${agentName.toLowerCase()}.*?(?:persona|mode|style)`, 'i'),
+              ];
+              if (patterns.some(pattern => pattern.test(thoughtText))) {
+                detectedAgent = agentName;
+                break;
+              }
+            }
+          }
         } else if (rawAccumulated.match(/<thought>/i)) {
           const openMatch = rawAccumulated.match(thoughtBlockRegex);
           if (openMatch) {
-             parsedThoughts = openMatch[1].split('\n').map(t => t.trim()).filter(t => t.length > 0);
+             const thoughtContent = openMatch[1];
+             parsedThoughts = thoughtContent.split('\n').map(t => t.trim()).filter(t => t.length > 0);
+             
+             // If Manager is active, try to detect which agent it selected
+             if (agent === 'Manager') {
+               const agentNames: AgentType[] = ['Socrates', 'Feynman', 'Pareto', 'Elon'];
+               const thoughtText = thoughtContent.toLowerCase();
+               for (const agentName of agentNames) {
+                 const patterns = [
+                   new RegExp(`(?:act|acting|adopt|adopting|switch|switching|use|using|select|selecting|choose|choosing).*?${agentName.toLowerCase()}`, 'i'),
+                   new RegExp(`persona.*?:.*?${agentName.toLowerCase()}`, 'i'),
+                   new RegExp(`${agentName.toLowerCase()}.*?(?:persona|mode|style)`, 'i'),
+                 ];
+                 if (patterns.some(pattern => pattern.test(thoughtText))) {
+                   detectedAgent = agentName;
+                   break;
+                 }
+               }
+             }
           }
           if (!rawAccumulated.match(/<\/\s*thought>/i)) {
               // If thought block is still open, don't show incomplete thoughts in main chat
@@ -516,16 +844,33 @@ function Workspace({ user, onLogout }: WorkspaceProps) {
            cleanContent = cleanContent.replace(noteBlockRegex, '');
         }
 
+        // Update final detected agent if found
+        if (detectedAgent) {
+          finalDetectedAgent = detectedAgent;
+        }
+
         setMessages(prev => prev.map(msg => 
           msg.id === responseId 
-            ? { ...msg, content: cleanContent.trim(), thoughtLog: parsedThoughts } 
+            ? { 
+                ...msg, 
+                content: cleanContent.trim(), 
+                thoughtLog: parsedThoughts,
+                // Update agent if Manager selected a different one
+                agent: detectedAgent || msg.agent
+              } 
             : msg
         ));
       }
 
+      // Final update to ensure agent is set correctly after stream completes
       setMessages(prev => prev.map(msg => {
         if (msg.id !== responseId) return msg;
-        return { ...msg, isStreaming: false };
+        return { 
+          ...msg, 
+          isStreaming: false,
+          // Use final detected agent if available, otherwise keep current
+          agent: finalDetectedAgent || msg.agent
+        };
       }));
 
     } catch (e) {
@@ -543,14 +888,22 @@ function Workspace({ user, onLogout }: WorkspaceProps) {
   // --- Selection Handlers (Branching Logic) ---
   const handleMouseUp = () => {
     const sel = window.getSelection();
-    if (!sel || sel.isCollapsed || !editorRef.current?.contains(sel.anchorNode)) {
-      setTimeout(() => {}, 100);
+    
+    // Hide menu if no selection or selection is collapsed
+    if (!sel || sel.isCollapsed) {
+      setSelection({ isVisible: false, x: 0, y: 0, text: '' });
+      return;
+    }
+
+    // Hide menu if selection is not within the editor
+    if (!editorRef.current?.contains(sel.anchorNode)) {
+      setSelection({ isVisible: false, x: 0, y: 0, text: '' });
       return;
     }
 
     const text = sel.toString();
     if (text.trim().length === 0) {
-      setSelection({ ...selection, isVisible: false });
+      setSelection({ isVisible: false, x: 0, y: 0, text: '' });
       return;
     }
 
@@ -598,16 +951,24 @@ function Workspace({ user, onLogout }: WorkspaceProps) {
 
   const handleSendMessage = (text?: string) => {
     const msgText = text || inputVal;
-    if (!msgText.trim()) return;
+    if (!msgText.trim() && selectedFileIds.length === 0) return;
+    
+    // Get referenced files content
+    const referencedFiles = uploadedFiles.filter(f => selectedFileIds.includes(f.id));
+    const filesContent = referencedFiles.map(f => 
+      `\n\n--- FILE: ${f.name} (${f.type.toUpperCase()}) ---\n${f.content.substring(0, 5000)}${f.content.length > 5000 ? '\n... (truncated)' : ''}`
+    ).join('\n');
     
     const userMsg: Message = {
       id: Date.now().toString() + '-user',
       role: 'user',
       content: msgText,
-      timestamp: Date.now()
+      timestamp: Date.now(),
+      referencedFiles: selectedFileIds.length > 0 ? selectedFileIds : undefined
     };
     setMessages(prev => [...prev, userMsg]);
     setInputVal('');
+    setSelectedFileIds([]); // Clear selected files after sending
 
     if(inputRef.current) inputRef.current.style.height = 'auto';
 
@@ -616,9 +977,13 @@ function Workspace({ user, onLogout }: WorkspaceProps) {
        ? "ACT AS AGENT: Manager (Auto-Router). Analyze the user input. Decide if you should answer directly OR switch to a specific persona (e.g., Socrates for questions, Feynman for explanations). State your decision in <thought>."
        : `ACT AS AGENT: ${activeAgent}.`;
 
+    const filesContext = filesContent 
+      ? `\n\nREFERENCED FILES CONTENT:${filesContent}\n\nIMPORTANT: The user has referenced the above files. Use this content to answer their question or perform the requested task.`
+      : '';
+
     const prompt = `${agentInstruction}
     
-    USER INPUT: "${msgText}".
+    USER INPUT: "${msgText}".${filesContext}
     
     CONTEXT - CURRENT NODE:
     ID: ${activeNoteId}
@@ -643,85 +1008,170 @@ function Workspace({ user, onLogout }: WorkspaceProps) {
   return (
     <div className="flex h-screen w-full bg-white text-gray-900 font-sans overflow-hidden selection:bg-indigo-100 selection:text-indigo-900">
       
-      {/* 1. Narrow Navigation Rail */}
-      <div className="w-16 bg-gray-50 border-r border-gray-200 flex flex-col items-center py-6 space-y-6 z-30 flex-shrink-0 shadow-sm">
-        <div className="w-10 h-10 bg-black rounded-xl flex items-center justify-center shadow-lg cursor-pointer hover:scale-105 transition">
-          <Brain className="text-white w-6 h-6" />
+      {/* 1. Left Sidebar: Conversations + Navigation */}
+      <div className="w-64 bg-gray-50 border-r border-gray-200 flex flex-col h-full z-30 flex-shrink-0 shadow-sm">
+        {/* Logo/Header */}
+        <div className="h-14 border-b border-gray-200 flex items-center justify-center bg-white">
+          <div className="w-10 h-10 bg-black rounded-xl flex items-center justify-center shadow-lg">
+            <Brain className="text-white w-6 h-6" />
+          </div>
         </div>
         
-        <div className="flex-1 w-full flex flex-col items-center space-y-4 pt-4">
+        {/* Conversations List */}
+        <div className="flex-1 overflow-y-auto border-b border-gray-200">
+          <div className="p-2">
+            <button
+              onClick={createNewConversation}
+              className="w-full px-3 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 transition flex items-center justify-center gap-2 text-sm font-medium mb-2"
+            >
+              <Plus className="w-4 h-4" />
+              New Conversation
+            </button>
+          </div>
+          <div className="px-2 space-y-1">
+            {conversations.map(conv => (
+              <div
+                key={conv.id}
+                onClick={() => loadConversation(conv.id)}
+                className={`p-2 rounded-lg cursor-pointer transition group ${
+                  activeConversationId === conv.id
+                    ? 'bg-indigo-100 border border-indigo-300'
+                    : 'hover:bg-gray-100 border border-transparent'
+                }`}
+              >
+                <div className="flex items-center justify-between">
+                  <div className="flex-1 min-w-0">
+                    <h4 className="text-sm font-medium text-gray-800 truncate">{conv.title}</h4>
+                    <p className="text-xs text-gray-500 mt-0.5">
+                      {conv.notes.length} notes • {new Date(conv.updatedAt).toLocaleDateString()}
+                    </p>
+                  </div>
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      if (confirm('Delete this conversation?')) {
+                        deleteConversation(conv.id);
+                      }
+                    }}
+                    className="opacity-0 group-hover:opacity-100 p-1 hover:bg-red-100 text-red-500 rounded ml-2 transition"
+                  >
+                    <Trash2 className="w-3 h-3" />
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+        
+        {/* Navigation Tools */}
+        <div className="p-2 space-y-2 border-t border-gray-200 bg-white">
            <button 
              onClick={handleCreateNote}
-             className="p-2 rounded-lg bg-indigo-600 text-white shadow-md hover:bg-indigo-700 transition relative group"
+             className="w-full px-3 py-2 rounded-lg bg-indigo-600 text-white shadow-md hover:bg-indigo-700 transition flex items-center justify-center gap-2 text-sm"
              title="New Note Node"
            >
-             <Feather className="w-5 h-5"/>
-           </button>
-
-           <div className="w-8 h-px bg-gray-200"></div>
-
-           <button 
-             onClick={() => setViewMode(viewMode === 'canvas' ? 'list' : 'canvas')}
-             className={`p-2 rounded-lg transition ${viewMode === 'canvas' ? 'bg-purple-100 text-purple-700' : 'hover:bg-gray-200 text-gray-400'}`}
-             title="Toggle Canvas View"
-           >
-             <Network className="w-5 h-5"/>
+             <Feather className="w-4 h-4"/>
+             New Note
            </button>
 
            <button 
              onClick={() => setIsNotePanelOpen(!isNotePanelOpen)}
-             className={`p-2 rounded-lg transition ${!isNotePanelOpen ? 'bg-red-50 text-red-400' : 'hover:bg-gray-200 text-gray-400'}`}
+             className={`w-full px-3 py-2 rounded-lg transition flex items-center justify-center gap-2 text-sm ${
+               !isNotePanelOpen ? 'bg-red-50 text-red-600' : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+             }`}
              title="Toggle Panel"
            >
-             <FileText className="w-5 h-5"/>
-           </button>
-
-           <button 
-             onClick={handleDownloadNotes}
-             className="p-2 rounded-lg hover:bg-gray-200 text-gray-400 transition"
-             title="Download Notes (JSON)"
-           >
-             <Download className="w-5 h-5"/>
+             <FileText className="w-4 h-4"/>
+             {isNotePanelOpen ? 'Hide' : 'Show'} Panel
            </button>
         </div>
         
-        <div className="relative group">
-          <button className="w-8 h-8 rounded-full bg-gradient-to-tr from-purple-400 to-blue-500 shadow-md flex items-center justify-center text-white text-xs font-bold">
-            {user.name.charAt(0)}
-          </button>
-          <div className="absolute left-full bottom-0 ml-2 mb-[-10px] w-32 bg-white rounded-lg shadow-xl border border-gray-100 py-1 hidden group-hover:block z-50">
-            <button onClick={onLogout} className="w-full text-left px-3 py-2 text-xs text-red-600 hover:bg-red-50 flex items-center gap-2">
-              <LogOut className="w-3 h-3" /> Sign Out
+        {/* User Profile */}
+        <div className="p-2 border-t border-gray-200 bg-white">
+          <div className="relative group">
+            <button className="w-full px-3 py-2 rounded-lg hover:bg-gray-100 transition flex items-center gap-2">
+              <div className="w-8 h-8 rounded-full bg-gradient-to-tr from-purple-400 to-blue-500 shadow-md flex items-center justify-center text-white text-xs font-bold">
+                {user.name.charAt(0)}
+              </div>
+              <span className="text-sm font-medium text-gray-700 flex-1 text-left truncate">{user.name}</span>
             </button>
+            <div className="absolute left-0 bottom-full mb-2 w-full bg-white rounded-lg shadow-xl border border-gray-100 py-1 hidden group-hover:block z-50">
+              <button onClick={onLogout} className="w-full text-left px-3 py-2 text-xs text-red-600 hover:bg-red-50 flex items-center gap-2">
+                <LogOut className="w-3 h-3" /> Sign Out
+              </button>
+            </div>
           </div>
         </div>
       </div>
 
       {/* 2. Left Panel: Canvas OR List */}
       {isNotePanelOpen && (
-        <div className="w-[50%] bg-gray-50 border-r border-gray-200 flex flex-col h-full relative transition-all duration-300 ease-in-out">
+        <div 
+          className="bg-gray-50 border-r border-gray-200 flex flex-col h-full relative transition-all duration-300 ease-in-out"
+          style={{ width: `${leftPanelWidth}%` }}
+        >
           
-          {/* Panel Header */}
-          <div className="h-14 border-b border-gray-200 flex items-center justify-between px-4 bg-white z-20 shadow-sm">
-             <span className="font-bold text-sm text-gray-700 flex items-center gap-2">
-                {viewMode === 'canvas' ? <Network className="w-4 h-4"/> : <FileText className="w-4 h-4"/>}
-                {viewMode === 'canvas' ? 'Knowledge Graph' : 'All Notes'}
-             </span>
-             <div className="text-xs text-gray-400">
-                {notes.length} nodes active
-             </div>
+          {/* Panel Header with Tabs */}
+          <div className="border-b border-gray-200 bg-white z-20 shadow-sm">
+            <div className="h-14 flex items-center justify-between px-4">
+              <div className="flex items-center gap-2">
+                {viewMode === 'canvas' && <Network className="w-4 h-4"/>}
+                {viewMode === 'list' && <FileText className="w-4 h-4"/>}
+                {viewMode === 'files' && <Folder className="w-4 h-4"/>}
+                <span className="font-bold text-sm text-gray-700">
+                  {viewMode === 'canvas' ? 'Knowledge Graph' : viewMode === 'list' ? 'All Notes' : 'Files'}
+                </span>
+              </div>
+              <div className="text-xs text-gray-400">
+                {viewMode === 'files' ? `${uploadedFiles.length} files` : `${notes.length} nodes`}
+              </div>
+            </div>
+            {/* Tab Switcher */}
+            <div className="flex border-t border-gray-100">
+              <button
+                onClick={() => setViewMode('canvas')}
+                className={`flex-1 px-3 py-2 text-xs font-medium transition-colors ${
+                  viewMode === 'canvas' 
+                    ? 'text-indigo-600 border-b-2 border-indigo-600 bg-indigo-50' 
+                    : 'text-gray-500 hover:text-gray-700 hover:bg-gray-50'
+                }`}
+              >
+                Canvas
+              </button>
+              <button
+                onClick={() => setViewMode('list')}
+                className={`flex-1 px-3 py-2 text-xs font-medium transition-colors ${
+                  viewMode === 'list' 
+                    ? 'text-indigo-600 border-b-2 border-indigo-600 bg-indigo-50' 
+                    : 'text-gray-500 hover:text-gray-700 hover:bg-gray-50'
+                }`}
+              >
+                Notes
+              </button>
+              <button
+                onClick={() => setViewMode('files')}
+                className={`flex-1 px-3 py-2 text-xs font-medium transition-colors ${
+                  viewMode === 'files' 
+                    ? 'text-indigo-600 border-b-2 border-indigo-600 bg-indigo-50' 
+                    : 'text-gray-500 hover:text-gray-700 hover:bg-gray-50'
+                }`}
+              >
+                Files
+              </button>
+            </div>
           </div>
 
           {/* Panel Content */}
-          <div className="flex-1 relative overflow-hidden">
+          <div className="flex-1 relative overflow-hidden flex flex-col">
              {viewMode === 'canvas' ? (
                 <CanvasView 
                   notes={notes} 
                   activeNoteId={activeNoteId} 
                   onNoteClick={(id) => { setActiveNoteId(id); setIsDetailViewOpen(true); }}
                   onNoteMove={handleNoteMove}
+                  onNoteDelete={handleDeleteNote}
                 />
-             ) : (
+             ) : viewMode === 'list' ? (
                 <div className="p-4 space-y-2 overflow-y-auto h-full">
                    {notes.map(note => (
                      <div 
@@ -734,6 +1184,73 @@ function Workspace({ user, onLogout }: WorkspaceProps) {
                      </div>
                    ))}
                 </div>
+             ) : (
+                <div className="flex-1 flex flex-col overflow-hidden">
+                  {/* File Upload Area */}
+                  <div className="p-4 border-b border-gray-200">
+                    <input
+                      ref={fileInputRef}
+                      type="file"
+                      multiple
+                      accept=".pdf,.txt,.md,.js,.ts,.jsx,.tsx,.py,.java,.cpp,.c,.cs,.php,.rb,.go,.rs,.swift,.kt,.html,.css,.scss,.less,.json,.xml,.yaml,.yml,.sql,.vue,.svelte"
+                      onChange={(e) => handleFileUpload(e.target.files)}
+                      className="hidden"
+                    />
+                    <button
+                      onClick={() => fileInputRef.current?.click()}
+                      className="w-full px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 transition flex items-center justify-center gap-2 text-sm"
+                    >
+                      <Upload className="w-4 h-4" />
+                      Upload Files
+                    </button>
+                  </div>
+                  
+                  {/* Files List */}
+                  <div className="flex-1 overflow-y-auto p-4 space-y-2">
+                    {uploadedFiles.length === 0 ? (
+                      <div className="text-center text-gray-400 py-8">
+                        <Folder className="w-12 h-12 mx-auto mb-2 opacity-50" />
+                        <p className="text-sm">No files uploaded yet</p>
+                        <p className="text-xs mt-1">Click "Upload Files" to add documents</p>
+                      </div>
+                    ) : (
+                      uploadedFiles.map(file => (
+                        <div
+                          key={file.id}
+                          className="p-3 rounded-lg border border-gray-200 bg-white hover:border-indigo-300 hover:shadow-sm transition group"
+                        >
+                          <div className="flex items-start justify-between">
+                            <div className="flex items-start gap-3 flex-1 min-w-0">
+                              <div className="mt-0.5">
+                                {file.type === 'pdf' && <File className="w-5 h-5 text-red-500" />}
+                                {file.type === 'md' && <FileText className="w-5 h-5 text-blue-500" />}
+                                {file.type === 'txt' && <FileText className="w-5 h-5 text-gray-500" />}
+                                {file.type === 'code' && <File className="w-5 h-5 text-green-500" />}
+                                {file.type === 'other' && <File className="w-5 h-5 text-gray-400" />}
+                              </div>
+                              <div className="flex-1 min-w-0">
+                                <h4 className="text-sm font-medium text-gray-800 truncate">{file.name}</h4>
+                                <p className="text-xs text-gray-500 mt-0.5">
+                                  {formatFileSize(file.size)} • {new Date(file.uploadedAt).toLocaleDateString()}
+                                </p>
+                              </div>
+                            </div>
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                handleDeleteFile(file.id);
+                              }}
+                              className="opacity-0 group-hover:opacity-100 p-1 hover:bg-red-50 text-red-500 rounded transition"
+                              title="Delete file"
+                            >
+                              <Trash2 className="w-4 h-4" />
+                            </button>
+                          </div>
+                        </div>
+                      ))
+                    )}
+                  </div>
+                </div>
              )}
           </div>
 
@@ -741,12 +1258,51 @@ function Workspace({ user, onLogout }: WorkspaceProps) {
           {isDetailViewOpen && activeNote && (
              <div className="absolute top-14 bottom-0 left-0 right-0 bg-white z-30 flex flex-col animate-in slide-in-from-bottom-10 fade-in duration-200">
                 <div className="h-12 border-b border-gray-100 flex items-center justify-between px-6 bg-gray-50/50">
-                  <button onClick={() => setIsDetailViewOpen(false)} className="text-xs font-medium text-gray-500 hover:text-gray-800 flex items-center gap-1">
+                  <button 
+                    onClick={() => {
+                      setIsDetailViewOpen(false);
+                      setCopySuccess(false);
+                    }} 
+                    className="text-xs font-medium text-gray-500 hover:text-gray-800 flex items-center gap-1"
+                  >
                     <ChevronDown className="w-3 h-3 rotate-90" /> Back to Canvas
                   </button>
                   <div className="flex items-center gap-2">
-                     <button onClick={(e) => handleDeleteNote(e, activeNote.id)} className="p-1.5 hover:bg-red-50 text-gray-400 hover:text-red-500 rounded"><Trash2 className="w-4 h-4"/></button>
-                     <button onClick={() => setIsDetailViewOpen(false)} className="p-1.5 hover:bg-gray-200 rounded"><X className="w-4 h-4"/></button>
+                     <button 
+                       onClick={() => handleCopyNote(activeNote)} 
+                       className={`p-1.5 rounded transition ${
+                         copySuccess 
+                           ? 'bg-green-100 text-green-600' 
+                           : 'hover:bg-green-50 text-gray-400 hover:text-green-500'
+                       }`}
+                       title={copySuccess ? "Copied!" : "Copy Note to Clipboard"}
+                     >
+                       <Copy className="w-4 h-4"/>
+                     </button>
+                     <button 
+                       onClick={() => handleDownloadNoteAsMarkdown(activeNote)} 
+                       className="p-1.5 hover:bg-blue-50 text-gray-400 hover:text-blue-500 rounded" 
+                       title="Download as Markdown"
+                     >
+                       <Download className="w-4 h-4"/>
+                     </button>
+                     <button 
+                       onClick={() => handleDeleteNote(activeNote.id)} 
+                       className="p-1.5 hover:bg-red-50 text-gray-400 hover:text-red-500 rounded"
+                       title="Delete Note"
+                     >
+                       <Trash2 className="w-4 h-4"/>
+                     </button>
+                     <button 
+                       onClick={() => {
+                         setIsDetailViewOpen(false);
+                         setCopySuccess(false);
+                       }} 
+                       className="p-1.5 hover:bg-gray-200 rounded"
+                       title="Close"
+                     >
+                       <X className="w-4 h-4"/>
+                     </button>
                   </div>
                 </div>
                 
@@ -772,6 +1328,7 @@ function Workspace({ user, onLogout }: WorkspaceProps) {
                 {/* Context Menu inside Editor */}
                 {selection.isVisible && (
                   <div 
+                    data-selection-menu
                     className="fixed z-50 flex items-center bg-white border border-gray-200 rounded-lg shadow-xl transform -translate-x-1/2 -translate-y-full transition-all"
                     style={{ top: selection.y - 5, left: selection.x }}
                   >
@@ -793,27 +1350,26 @@ function Workspace({ user, onLogout }: WorkspaceProps) {
         </div>
       )}
 
+      {/* Resize Handle */}
+      {isNotePanelOpen && (
+        <div
+          onMouseDown={handleResizeMouseDown}
+          className={`w-1 bg-gray-200 hover:bg-indigo-400 cursor-col-resize transition-colors z-40 ${isResizing ? 'bg-indigo-500' : ''}`}
+          style={{ flexShrink: 0 }}
+        />
+      )}
+
       {/* 3. Main Chat Interface (Center/Right) */}
-      <div className="flex-1 flex flex-col relative bg-white min-w-0 border-l border-gray-200 shadow-[-5px_0_15px_-5px_rgba(0,0,0,0.05)]">
+      <div 
+        className="flex-1 flex flex-col relative bg-white min-w-0 border-l border-gray-200 shadow-[-5px_0_15px_-5px_rgba(0,0,0,0.05)]"
+        style={{ width: isNotePanelOpen ? `${100 - leftPanelWidth}%` : '100%' }}
+      >
         
         {/* Chat Header */}
         <div className="h-14 flex items-center justify-between px-6 border-b border-gray-50">
            <div className="flex items-center space-x-2">
               <span className="text-lg font-semibold text-gray-800">ThinkFlow Chat</span>
               <span className="px-2 py-0.5 bg-green-100 text-green-700 text-[10px] font-bold rounded-full tracking-wide">LIVE</span>
-           </div>
-           
-           {/* Agent Selector Pill */}
-           <div className="flex bg-gray-100 p-1 rounded-lg">
-              {(['Manager', 'Socrates', 'Feynman', 'Pareto', 'Elon'] as AgentType[]).map((agent) => (
-                 <button
-                   key={agent}
-                   onClick={() => setActiveAgent(agent)}
-                   className={`px-3 py-1 text-xs font-medium rounded-md transition-all ${activeAgent === agent ? 'bg-white shadow text-gray-900' : 'text-gray-500 hover:text-gray-700'}`}
-                 >
-                   {agent}
-                 </button>
-              ))}
            </div>
         </div>
 
@@ -842,6 +1398,22 @@ function Workspace({ user, onLogout }: WorkspaceProps) {
                           <ThoughtLog logs={msg.thoughtLog} />
                        )}
 
+                       {/* Referenced Files Display */}
+                       {isUser && msg.referencedFiles && msg.referencedFiles.length > 0 && (
+                         <div className="mb-2 flex flex-wrap gap-2">
+                           {msg.referencedFiles.map(fileId => {
+                             const file = uploadedFiles.find(f => f.id === fileId);
+                             if (!file) return null;
+                             return (
+                               <div key={fileId} className="px-2 py-1 bg-indigo-50 border border-indigo-200 rounded-md text-xs flex items-center gap-1.5">
+                                 <File className="w-3 h-3 text-indigo-600" />
+                                 <span className="text-indigo-700 font-medium">{file.name}</span>
+                               </div>
+                             );
+                           })}
+                         </div>
+                       )}
+                       
                        <div className={`
                          relative px-5 py-3.5 rounded-2xl text-sm leading-relaxed shadow-sm
                          ${isUser 
@@ -881,10 +1453,93 @@ function Workspace({ user, onLogout }: WorkspaceProps) {
                 </div>
               )}
 
+              {/* Selected Files Display */}
+              {selectedFileIds.length > 0 && (
+                <div className="mb-2 flex flex-wrap gap-2">
+                  {selectedFileIds.map(fileId => {
+                    const file = uploadedFiles.find(f => f.id === fileId);
+                    if (!file) return null;
+                    return (
+                      <div key={fileId} className="px-3 py-1.5 bg-indigo-100 border border-indigo-300 rounded-lg text-sm flex items-center gap-2">
+                        <File className="w-4 h-4 text-indigo-600" />
+                        <span className="text-indigo-700 font-medium">{file.name}</span>
+                        <button
+                          onClick={() => setSelectedFileIds(prev => prev.filter(id => id !== fileId))}
+                          className="text-indigo-600 hover:text-indigo-800"
+                        >
+                          <X className="w-3 h-3" />
+                        </button>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+
               <div className="relative bg-white border border-gray-300 rounded-2xl shadow-lg focus-within:shadow-xl focus-within:border-indigo-500 transition-all">
+                {/* File Reference Button */}
+                <div className="relative">
+                  <button
+                    onClick={() => setShowFileSelector(!showFileSelector)}
+                    className="absolute left-3 top-1/2 -translate-y-1/2 p-1.5 text-gray-400 hover:text-indigo-600 hover:bg-indigo-50 rounded transition"
+                    title="Reference files"
+                  >
+                    <File className="w-5 h-5" />
+                  </button>
+                  
+                  {/* File Selector Dropdown */}
+                  {showFileSelector && (
+                    <div
+                      ref={fileSelectorRef}
+                      className="absolute bottom-full left-0 mb-2 w-80 bg-white border border-gray-200 rounded-lg shadow-xl z-50 max-h-64 overflow-y-auto"
+                    >
+                      <div className="p-2 border-b border-gray-100">
+                        <h4 className="text-xs font-semibold text-gray-700 px-2 py-1">Select files to reference</h4>
+                      </div>
+                      <div className="p-2 space-y-1">
+                        {uploadedFiles.length === 0 ? (
+                          <div className="px-3 py-4 text-center text-gray-400 text-sm">
+                            No files uploaded yet
+                          </div>
+                        ) : (
+                          uploadedFiles.map(file => {
+                            const isSelected = selectedFileIds.includes(file.id);
+                            return (
+                              <div
+                                key={file.id}
+                                onClick={() => {
+                                  if (isSelected) {
+                                    setSelectedFileIds(prev => prev.filter(id => id !== file.id));
+                                  } else {
+                                    setSelectedFileIds(prev => [...prev, file.id]);
+                                  }
+                                }}
+                                className={`p-2 rounded-lg cursor-pointer transition ${
+                                  isSelected
+                                    ? 'bg-indigo-50 border border-indigo-300'
+                                    : 'hover:bg-gray-50 border border-transparent'
+                                }`}
+                              >
+                                <div className="flex items-center gap-2">
+                                  <div className={`w-4 h-4 rounded border-2 flex items-center justify-center ${
+                                    isSelected ? 'bg-indigo-600 border-indigo-600' : 'border-gray-300'
+                                  }`}>
+                                    {isSelected && <Check className="w-3 h-3 text-white" />}
+                                  </div>
+                                  <File className="w-4 h-4 text-gray-500" />
+                                  <span className="text-sm text-gray-700 flex-1 truncate">{file.name}</span>
+                                </div>
+                              </div>
+                            );
+                          })
+                        )}
+                      </div>
+                    </div>
+                  )}
+                </div>
+
                 <textarea
                   ref={inputRef}
-                  className="w-full bg-transparent border-none focus:ring-0 resize-none py-4 pl-4 pr-12 max-h-48 text-base text-gray-800 placeholder-gray-400"
+                  className="w-full bg-transparent border-none focus:ring-0 resize-none py-4 pl-12 pr-20 max-h-48 text-base text-gray-800 placeholder-gray-400"
                   placeholder={`Ask ${activeAgent}...`}
                   rows={1}
                   value={inputVal}
@@ -899,11 +1554,16 @@ function Workspace({ user, onLogout }: WorkspaceProps) {
                       handleSendMessage();
                     }
                   }}
+                  onClick={() => setShowFileSelector(false)}
                 />
                 <button 
-                  className={`absolute right-3 bottom-3 p-2 rounded-xl transition-all duration-200 ${inputVal.trim() && !isThinking ? 'bg-black text-white hover:bg-gray-800' : 'bg-gray-100 text-gray-300 cursor-not-allowed'}`}
+                  className={`absolute right-3 bottom-3 p-2 rounded-xl transition-all duration-200 ${
+                    (inputVal.trim() || selectedFileIds.length > 0) && !isThinking 
+                      ? 'bg-black text-white hover:bg-gray-800' 
+                      : 'bg-gray-100 text-gray-300 cursor-not-allowed'
+                  }`}
                   onClick={() => handleSendMessage()}
-                  disabled={!inputVal.trim() || isThinking}
+                  disabled={!inputVal.trim() && selectedFileIds.length === 0 || isThinking}
                 >
                   <ArrowRight className="w-5 h-5" />
                 </button>
