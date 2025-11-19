@@ -954,10 +954,34 @@ function Workspace({ user, onLogout }: WorkspaceProps) {
       }));
 
     } catch (e) {
-      console.error(e);
+      console.error('Stream error:', e);
+      let errorMessage: string;
+      
+      if (e instanceof Error) {
+        // 显示后端传递的具体错误信息
+        errorMessage = e.message;
+        
+        // 如果是通用的错误消息，提供更友好的提示
+        if (e.message === 'Stream error occurred') {
+          errorMessage = "流处理过程中发生错误。请检查后端控制台的详细错误信息。";
+        }
+      } else {
+        errorMessage = "连接错误，请重试。";
+      }
+      
+      // 格式化错误消息（保留换行符，添加错误标记）
+      // 确保错误消息被安全处理，避免 URL 被误解析
+      const safeErrorMessage = errorMessage
+        .replace(/`/g, '\\`')  // 转义反引号
+        .replace(/\$\{/g, '\\${');  // 转义模板字符串语法
+      
+      const formattedError = safeErrorMessage.includes('\n') 
+        ? `❌ **错误**\n\n${safeErrorMessage}`
+        : `❌ 错误: ${safeErrorMessage}`;
+      
       setMessages(prev => prev.map(msg => 
         msg.id === responseId 
-          ? { ...msg, content: "I encountered a connection error. Please try again." } 
+          ? { ...msg, content: formattedError, isStreaming: false } 
           : msg
       ));
     } finally {

@@ -27,8 +27,28 @@ router.post('/stream', async (req, res) => {
       res.end();
     } catch (error) {
       console.error('Stream error:', error);
-      res.write(`data: ${JSON.stringify({ error: 'Stream error occurred' })}\n\n`);
-      res.end();
+      // 提取错误信息，传递给前端
+      const errorMessage = error instanceof Error 
+        ? error.message 
+        : String(error);
+      const errorDetails = error instanceof Error && error.stack
+        ? error.stack
+        : undefined;
+      
+      console.error('Error details:', errorDetails || errorMessage);
+      
+      // 尝试发送错误信息（如果连接还未关闭）
+      try {
+        res.write(`data: ${JSON.stringify({ 
+          error: errorMessage,
+          details: process.env.NODE_ENV === 'development' ? errorDetails : undefined
+        })}\n\n`);
+        res.end();
+      } catch (writeError) {
+        // 如果写入失败（连接已关闭），只记录日志
+        console.error('Failed to send error to client:', writeError);
+        res.end();
+      }
     }
   } catch (error) {
     console.error('Error in /stream:', error);

@@ -34,19 +34,28 @@ export const sendMessageStreamToGemini = async function* (message: string) {
 
     for (const line of lines) {
       if (line.startsWith('data: ')) {
+        const jsonStr = line.slice(6);
+        let data: any;
         try {
-          const data = JSON.parse(line.slice(6));
-          if (data.done) {
-            return;
-          }
-          if (data.error) {
-            throw new Error(data.error);
-          }
-          if (data.chunk) {
-            yield data.chunk;
-          }
-        } catch (e) {
-          console.error('Error parsing SSE data:', e);
+          data = JSON.parse(jsonStr);
+        } catch (parseError) {
+          // JSON 解析错误，只记录日志但继续处理
+          console.error('Error parsing SSE JSON:', parseError, 'Line:', jsonStr);
+          continue;
+        }
+        
+        // 检查服务器返回的错误
+        if (data.error) {
+          // 服务器返回的错误，需要抛出以停止流处理
+          throw new Error(data.error);
+        }
+        
+        if (data.done) {
+          return;
+        }
+        
+        if (data.chunk) {
+          yield data.chunk;
         }
       }
     }
@@ -57,13 +66,24 @@ export const sendMessageStreamToGemini = async function* (message: string) {
     const lines = buffer.split('\n');
     for (const line of lines) {
       if (line.startsWith('data: ')) {
+        const jsonStr = line.slice(6);
+        let data: any;
         try {
-          const data = JSON.parse(line.slice(6));
-          if (data.chunk) {
-            yield data.chunk;
-          }
-        } catch (e) {
-          console.error('Error parsing SSE data:', e);
+          data = JSON.parse(jsonStr);
+        } catch (parseError) {
+          // JSON 解析错误，只记录日志但继续处理
+          console.error('Error parsing SSE JSON:', parseError, 'Line:', jsonStr);
+          continue;
+        }
+        
+        // 检查服务器返回的错误
+        if (data.error) {
+          // 服务器返回的错误，需要抛出以停止流处理
+          throw new Error(data.error);
+        }
+        
+        if (data.chunk) {
+          yield data.chunk;
         }
       }
     }
