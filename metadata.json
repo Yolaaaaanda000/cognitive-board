@@ -1,0 +1,5 @@
+{
+  "name": "Cognitive Board",
+  "description": "A personal cognitive board of directors powered by Gemini, featuring multiple thinking models like First Principles, Pareto, and Socratic questioning.",
+  "requestFramePermissions": []
+}
