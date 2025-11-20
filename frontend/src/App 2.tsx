@@ -37,11 +37,6 @@ import { processFileUpload, formatFileSize } from './services/fileService';
 import { AgentType, Message, SelectionState, AGENTS_CONFIG, User as UserType, Note, Conversation, UploadedFile } from './types';
 import { INITIAL_NOTE_CONTENT } from './constants';
 import AuthPage from './components/AuthPage';
-import { supabase, isSupabaseConfigured } from './lib/supabaseClient';
-import { fetchConversations, createConversation, updateConversation, deleteConversation as deleteConversationDb } from './services/conversationService';
-import { createNote, updateNote, saveNoteImmediately, deleteNote } from './services/noteService';
-import { createMessage, updateMessage } from './services/messageService';
-import { fetchFilesForConversation, saveFile, deleteFile as deleteFileDb } from './services/fileDbService';
 
 // --- Helper Components ---
 
@@ -323,41 +318,7 @@ function Workspace({ user, onLogout }: WorkspaceProps) {
   const chatContainerRef = useRef<HTMLDivElement>(null);
 
   // --- Conversation Management Functions ---
-  const createNewConversation = async () => {
-    if (!user?.id) return;
-
-    const newTitle = `对话 ${conversations.length + 1}`;
-    
-    if (isSupabaseConfigured() && supabase) {
-      try {
-        // 保存到数据库
-        const newConv = await createConversation(user.id, newTitle);
-        const defaultMessage: Message = {
-          id: Date.now().toString() + '-ai',
-          role: 'ai',
-          agent: 'Manager',
-          content: `Hello, ${user.name.split(' ')[0]}. I'm ThinkFlow. \n\nI can help you brainstorm, plan, or analyze complex topics. Notes are visualized as a knowledge graph on the left. \n\nWhat's on your mind?`,
-          timestamp: Date.now()
-        };
-        await createMessage(newConv.id, user.id, defaultMessage);
-        newConv.messages = [defaultMessage];
-        newConv.notes = [];
-        
-        setConversations(prev => [...prev, newConv]);
-        setActiveConversationId(newConv.id);
-        loadConversation(newConv.id);
-      } catch (error) {
-        console.error('Error creating conversation:', error);
-        // 降级到 localStorage
-        createLocalConversation();
-      }
-    } else {
-      // 降级到 localStorage
-      createLocalConversation();
-    }
-  };
-
-  const createLocalConversation = () => {
+  const createNewConversation = () => {
     const newConv: Conversation = {
       id: Date.now().toString(),
       title: `对话 ${conversations.length + 1}`,
@@ -377,43 +338,8 @@ function Workspace({ user, onLogout }: WorkspaceProps) {
     loadConversation(newConv.id);
   };
 
-  const loadConversation = useCallback(async (conversationId: string, convList?: Conversation[]) => {
-    if (!user?.id) return;
-
+  const loadConversation = useCallback((conversationId: string, convList?: Conversation[]) => {
     const convs = convList || conversations;
-    const conv = convs.find(c => c.id === conversationId);
-    
-    if (isSupabaseConfigured() && supabase) {
-      try {
-        // 从数据库加载笔记、消息和文件
-        const [dbNotes, dbMessages, dbFiles] = await Promise.all([
-          import('./services/noteService').then(m => m.fetchNotesForConversation(conversationId)),
-          import('./services/messageService').then(m => m.fetchMessagesForConversation(conversationId)),
-          import('./services/fileDbService').then(m => m.fetchFilesForConversation(conversationId))
-        ]);
-
-        setNotes(dbNotes);
-        setMessages(dbMessages);
-        setUploadedFiles(dbFiles);
-        setActiveConversationId(conversationId);
-        
-        if (dbNotes.length > 0) {
-          setActiveNoteId(dbNotes[0].id);
-        } else {
-          createDefaultNote();
-        }
-      } catch (error) {
-        console.error('Error loading conversation from database:', error);
-        // 降级到 localStorage
-        loadLocalConversation(conversationId, convs);
-      }
-    } else {
-      // 降级到 localStorage
-      loadLocalConversation(conversationId, convs);
-    }
-  }, [user?.id]);
-
-  const loadLocalConversation = (conversationId: string, convs: Conversation[]) => {
     const conv = convs.find(c => c.id === conversationId);
     if (conv) {
       setNotes(conv.notes);
@@ -432,25 +358,12 @@ function Workspace({ user, onLogout }: WorkspaceProps) {
         setUploadedFiles([]);
       }
     }
-  };
+  }, []);
 
-  const deleteConversation = async (conversationId: string) => {
-    if (!user?.id) return;
-
-    if (isSupabaseConfigured() && supabase) {
-      try {
-        // 从数据库删除（级联删除会自动处理关联的笔记、消息和文件）
-        await deleteConversationDb(conversationId);
-      } catch (error) {
-        console.error('Error deleting conversation from database:', error);
-      }
-    } else {
-      // 降级：删除 localStorage 中的文件
-      localStorage.removeItem(`tf_files_${conversationId}`);
-    }
-
+  const deleteConversation = (conversationId: string) => {
     setConversations(prev => prev.filter(c => c.id !== conversationId));
-    
+    // Delete associated files
+    localStorage.removeItem(`tf_files_${conversationId}`);
     // If deleting active conversation, switch to another
     if (activeConversationId === conversationId) {
       const remaining = conversations.filter(c => c.id !== conversationId);
@@ -556,9 +469,7 @@ function Workspace({ user, onLogout }: WorkspaceProps) {
 
   // --- Initialization ---
   useEffect(() => {
-    if (!user?.id) return;
-
-    // Load layout preferences (always use localStorage for UI preferences)
+    // Load layout preferences
     const storedLeftOpen = localStorage.getItem('tf_layout_left_open');
     const storedRightOpen = localStorage.getItem('tf_layout_right_open');
     if (storedLeftOpen !== null) {
@@ -568,95 +479,34 @@ function Workspace({ user, onLogout }: WorkspaceProps) {
       setIsRightOpen(storedRightOpen === 'true');
     }
     
-    // Load conversations from database or localStorage
-    const loadData = async () => {
-      if (isSupabaseConfigured() && supabase) {
-        try {
-          // 从数据库加载对话
-          const dbConversations = await fetchConversations(user.id);
-          
-          if (dbConversations.length > 0) {
-            setConversations(dbConversations);
-            const activeId = localStorage.getItem('tf_active_conversation_id');
-            const targetId = activeId && dbConversations.find(c => c.id === activeId)
-              ? activeId
-              : dbConversations[0].id;
-            loadConversation(targetId, dbConversations);
-          } else {
-            // 创建默认对话
-            const newConv = await createConversation(user.id, `对话 1`);
-            const defaultMessage: Message = {
-              id: '1',
-              role: 'ai',
-              agent: 'Manager',
-              content: `Hello, ${user.name.split(' ')[0]}. I'm ThinkFlow. \n\nI can help you brainstorm, plan, or analyze complex topics. Notes are visualized as a knowledge graph on the left. \n\nWhat's on your mind?`,
-              timestamp: Date.now()
-            };
-            await createMessage(newConv.id, user.id, defaultMessage);
-            const convs = [newConv];
-            setConversations(convs);
-            loadConversation(newConv.id, convs);
-          }
-        } catch (error) {
-          console.error('Error loading conversations from database:', error);
-          // 降级到 localStorage
-          const storedConversations = localStorage.getItem('tf_conversations');
-          if (storedConversations) {
-            const parsed = JSON.parse(storedConversations);
-            setConversations(parsed);
-            const activeId = localStorage.getItem('tf_active_conversation_id');
-            if (activeId && parsed.find((c: Conversation) => c.id === activeId)) {
-              loadConversation(activeId, parsed);
-            } else if (parsed.length > 0) {
-              loadConversation(parsed[0].id, parsed);
-            } else {
-              createNewConversation();
-            }
-          } else {
-            createNewConversation();
-          }
-        }
+    // Load conversations
+    const storedConversations = localStorage.getItem('tf_conversations');
+    if (storedConversations) {
+      const parsed = JSON.parse(storedConversations);
+      setConversations(parsed);
+      const activeId = localStorage.getItem('tf_active_conversation_id');
+      if (activeId && parsed.find((c: Conversation) => c.id === activeId)) {
+        loadConversation(activeId, parsed);
+      } else if (parsed.length > 0) {
+        loadConversation(parsed[0].id, parsed);
       } else {
-        // 降级到 localStorage
-        const storedConversations = localStorage.getItem('tf_conversations');
-        if (storedConversations) {
-          const parsed = JSON.parse(storedConversations);
-          setConversations(parsed);
-          const activeId = localStorage.getItem('tf_active_conversation_id');
-          if (activeId && parsed.find((c: Conversation) => c.id === activeId)) {
-            loadConversation(activeId, parsed);
-          } else if (parsed.length > 0) {
-            loadConversation(parsed[0].id, parsed);
-          } else {
-            createNewConversation();
-          }
-        } else {
-          // First time: create default conversation
-          createNewConversation();
-        }
+        createNewConversation();
       }
-    };
-
-    loadData();
-  }, [user?.id]);
-
-  // Save active conversation ID (always use localStorage for this)
-  useEffect(() => {
-    if (activeConversationId) {
-      localStorage.setItem('tf_active_conversation_id', activeConversationId);
+    } else {
+      // First time: create default conversation
+      createNewConversation();
     }
-  }, [activeConversationId]);
+  }, []);
 
-  // Save conversations to database or localStorage
-  // Note: This is mainly for fallback. Actual saving happens in individual operations.
+  // Save conversations and active conversation ID
   useEffect(() => {
-    if (!user?.id || conversations.length === 0) return;
-    
-    // 如果未配置 Supabase，降级到 localStorage
-    if (!isSupabaseConfigured()) {
+    if (conversations.length > 0) {
       localStorage.setItem('tf_conversations', JSON.stringify(conversations));
+      if (activeConversationId) {
+        localStorage.setItem('tf_active_conversation_id', activeConversationId);
+      }
     }
-  }, [conversations, user?.id]);
+  }, [conversations, activeConversationId]);
 
   // Save layout preferences
   useEffect(() => {
@@ -1104,34 +954,10 @@ function Workspace({ user, onLogout }: WorkspaceProps) {
       }));
 
     } catch (e) {
-      console.error('Stream error:', e);
-      let errorMessage: string;
-      
-      if (e instanceof Error) {
-        // 显示后端传递的具体错误信息
-        errorMessage = e.message;
-        
-        // 如果是通用的错误消息，提供更友好的提示
-        if (e.message === 'Stream error occurred') {
-          errorMessage = "流处理过程中发生错误。请检查后端控制台的详细错误信息。";
-        }
-      } else {
-        errorMessage = "连接错误，请重试。";
-      }
-      
-      // 格式化错误消息（保留换行符，添加错误标记）
-      // 确保错误消息被安全处理，避免 URL 被误解析
-      const safeErrorMessage = errorMessage
-        .replace(/`/g, '\\`')  // 转义反引号
-        .replace(/\$\{/g, '\\${');  // 转义模板字符串语法
-      
-      const formattedError = safeErrorMessage.includes('\n') 
-        ? `❌ **错误**\n\n${safeErrorMessage}`
-        : `❌ 错误: ${safeErrorMessage}`;
-      
+      console.error(e);
       setMessages(prev => prev.map(msg => 
         msg.id === responseId 
-          ? { ...msg, content: formattedError, isStreaming: false } 
+          ? { ...msg, content: "I encountered a connection error. Please try again." } 
           : msg
       ));
     } finally {
@@ -1945,79 +1771,22 @@ function Workspace({ user, onLogout }: WorkspaceProps) {
 
 const App: React.FC = () => {
   const [user, setUser] = useState<UserType | null>(null);
-  const [isLoading, setIsLoading] = useState(true);
 
   useEffect(() => {
-    // 如果 Supabase 已配置，使用 Supabase Auth
-    if (isSupabaseConfigured() && supabase) {
-      // 获取当前 session
-      supabase.auth.getSession().then(({ data: { session } }) => {
-        if (session?.user) {
-          setUser({
-            id: session.user.id,
-            email: session.user.email!,
-            name: session.user.user_metadata?.full_name || session.user.email!.split('@')[0]
-          });
-        }
-        setIsLoading(false);
-      });
-
-      // 监听 auth 状态变化
-      const { data: { subscription } } = supabase.auth.onAuthStateChange(
-        (_event, session) => {
-          if (session?.user) {
-            setUser({
-              id: session.user.id,
-              email: session.user.email!,
-              name: session.user.user_metadata?.full_name || session.user.email!.split('@')[0]
-            });
-          } else {
-            setUser(null);
-            // 清除 localStorage（如果有旧数据）
-            localStorage.removeItem('tf_current_user');
-          }
-          setIsLoading(false);
-        }
-      );
-
-      return () => subscription.unsubscribe();
-    } else {
-      // 降级到 localStorage
-      const storedUser = localStorage.getItem('tf_current_user');
-      if (storedUser) {
-        setUser(JSON.parse(storedUser));
-      }
-      setIsLoading(false);
+    const storedUser = localStorage.getItem('tf_current_user');
+    if (storedUser) {
+      setUser(JSON.parse(storedUser));
     }
   }, []);
 
   const handleLogin = (loggedInUser: UserType) => {
     setUser(loggedInUser);
-    // 如果使用 localStorage，保存用户信息
-    if (!isSupabaseConfigured()) {
-      localStorage.setItem('tf_current_user', JSON.stringify(loggedInUser));
-    }
   };
 
-  const handleLogout = async () => {
-    if (isSupabaseConfigured() && supabase) {
-      await supabase.auth.signOut();
-    } else {
-      localStorage.removeItem('tf_current_user');
-      setUser(null);
-    }
+  const handleLogout = () => {
+    localStorage.removeItem('tf_current_user');
+    setUser(null);
   };
-
-  if (isLoading) {
-    return (
-      <div className="min-h-screen flex items-center justify-center bg-gray-50">
-        <div className="text-center">
-          <div className="w-12 h-12 border-4 border-indigo-600 border-t-transparent rounded-full animate-spin mx-auto mb-4"></div>
-          <p className="text-gray-600">加载中...</p>
-        </div>
-      </div>
-    );
-  }
 
   if (!user) {
     return <AuthPage onLogin={handleLogin} />;

@@ -1,5 +1,8 @@
 // 前端 API 客户端
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:3001';
+// 在开发环境中，使用 Vite 代理（相对路径）
+// 在生产环境中，使用完整 URL 或环境变量配置的 URL
+const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 
+  (import.meta.env.DEV ? '' : 'http://localhost:3001');
 
 export const sendMessageStreamToGemini = async function* (message: string) {
   const response = await fetch(`${API_BASE_URL}/api/gemini/stream`, {

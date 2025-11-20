@@ -2,6 +2,7 @@
 import React, { useState } from 'react';
 import { Brain, Mail, Lock, User, ArrowRight, Sparkles } from './Icons';
 import { User as UserType } from '../types';
+import { supabase, isSupabaseConfigured } from '../lib/supabaseClient';
 
 interface AuthPageProps {
   onLogin: (user: UserType) => void;
@@ -22,47 +23,105 @@ export default function AuthPage({ onLogin }: AuthPageProps) {
     setError('');
     setIsLoading(true);
 
-    // Simulate network delay
-    await new Promise(resolve => setTimeout(resolve, 800));
-
     try {
       if (!email || !password || (!isLogin && !name)) {
-        throw new Error('Please fill in all fields.');
+        throw new Error('请填写所有字段');
       }
 
-      // Mock Database Logic using LocalStorage
-      const usersStr = localStorage.getItem('tf_users');
-      const users = usersStr ? JSON.parse(usersStr) : [];
+      // 如果 Supabase 已配置，使用 Supabase Auth
+      if (isSupabaseConfigured() && supabase) {
+        if (isLogin) {
+          // 登录
+          const { data, error } = await supabase.auth.signInWithPassword({
+            email,
+            password,
+          });
 
-      if (isLogin) {
-        const user = users.find((u: any) => u.email === email && u.password === password);
-        if (user) {
-          const userData: UserType = { id: user.id, name: user.name, email: user.email };
-          localStorage.setItem('tf_current_user', JSON.stringify(userData));
-          onLogin(userData);
+          if (error) {
+            throw new Error(error.message || '登录失败');
+          }
+
+          if (data?.user) {
+            const userData: UserType = {
+              id: data.user.id,
+              email: data.user.email!,
+              name: data.user.user_metadata?.full_name || data.user.email!.split('@')[0]
+            };
+            onLogin(userData);
+          }
         } else {
-          throw new Error('Invalid email or password.');
+          // 注册
+          const { data, error } = await supabase.auth.signUp({
+            email,
+            password,
+            options: {
+              data: {
+                full_name: name
+              }
+            }
+          });
+
+          if (error) {
+            throw new Error(error.message || '注册失败');
+          }
+
+          if (data?.user) {
+            const userData: UserType = {
+              id: data.user.id,
+              email: data.user.email!,
+              name: name
+            };
+            
+            // 检查是否需要邮箱验证
+            if (data.session) {
+              // 如果直接返回 session，说明邮箱验证已禁用，直接登录
+              onLogin(userData);
+            } else {
+              // 需要邮箱验证
+              setError('注册成功！请检查您的邮箱以验证账号。');
+              setIsLoading(false);
+              return;
+            }
+          }
         }
       } else {
-        // Signup
-        if (users.find((u: any) => u.email === email)) {
-          throw new Error('User already exists.');
+        // 降级到 localStorage（如果 Supabase 未配置）
+        // Simulate network delay
+        await new Promise(resolve => setTimeout(resolve, 800));
+
+        const usersStr = localStorage.getItem('tf_users');
+        const users = usersStr ? JSON.parse(usersStr) : [];
+
+        if (isLogin) {
+          const user = users.find((u: any) => u.email === email && u.password === password);
+          if (user) {
+            const userData: UserType = { id: user.id, name: user.name, email: user.email };
+            localStorage.setItem('tf_current_user', JSON.stringify(userData));
+            onLogin(userData);
+          } else {
+            throw new Error('邮箱或密码错误');
+          }
+        } else {
+          // Signup
+          if (users.find((u: any) => u.email === email)) {
+            throw new Error('用户已存在');
+          }
+          const newUser = {
+            id: Date.now().toString(),
+            name,
+            email,
+            password // In a real app, never store plain text passwords!
+          };
+          users.push(newUser);
+          localStorage.setItem('tf_users', JSON.stringify(users));
+          
+          const userData: UserType = { id: newUser.id, name: newUser.name, email: newUser.email };
+          localStorage.setItem('tf_current_user', JSON.stringify(userData));
+          onLogin(userData);
         }
-        const newUser = {
-          id: Date.now().toString(),
-          name,
-          email,
-          password // In a real app, never store plain text passwords!
-        };
-        users.push(newUser);
-        localStorage.setItem('tf_users', JSON.stringify(users));
-        
-        const userData: UserType = { id: newUser.id, name: newUser.name, email: newUser.email };
-        localStorage.setItem('tf_current_user', JSON.stringify(userData));
-        onLogin(userData);
       }
     } catch (err: any) {
-      setError(err.message || 'An error occurred');
+      setError(err.message || '发生错误');
     } finally {
       setIsLoading(false);
     }
@@ -149,8 +208,14 @@ export default function AuthPage({ onLogin }: AuthPageProps) {
               </div>
 
               {error && (
-                <div className="text-red-500 text-xs text-center bg-red-50 py-2 rounded-lg">
+                <div className="text-red-500 text-xs text-center bg-red-50 py-2 rounded-lg whitespace-pre-wrap">
                   {error}
+                </div>
+              )}
+              
+              {!isSupabaseConfigured() && (
+                <div className="text-yellow-600 text-xs text-center bg-yellow-50 py-2 rounded-lg">
+                  ⚠️ 数据库未配置，当前使用本地存储（数据仅在当前浏览器有效）
                 </div>
               )}
 

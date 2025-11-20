@@ -1,111 +1,120 @@
-import { GoogleGenAI, Chat } from "@google/genai";
+import { GoogleGenAI } from "@google/genai";
 import { SYSTEM_INSTRUCTION } from "../constants.js";
+// @ts-ignore - undici is built-in Node.js 18+ module
+import { setGlobalDispatcher, ProxyAgent } from 'undici';
+import dotenv from 'dotenv';
+import { fileURLToPath } from 'url';
+import { dirname, join } from 'path';
 
-let chatSession: Chat | null = null;
+// 确保环境变量已加载（防止导入顺序问题）
+// 获取当前文件的目录路径（ESM 模块需要）
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
 
-// 直接设置代理（硬编码在代码中）
-// 如果需要修改代理地址，请直接修改下面的代理配置
-// 
-// ⚠️ 待解决问题：虽然代理配置已设置，但 GoogleGenAI SDK 仍无法通过代理连接
-// 详细问题记录请查看：files/代理连接问题记录.md
-const HTTPS_PROXY = 'http://127.0.0.1:8118';
-const HTTP_PROXY = 'http://127.0.0.1:8118';
-const ALL_PROXY = 'socks5://127.0.0.1:8119';
+// 加载 .env 文件（指定路径以确保正确加载）
+const envPath = join(__dirname, '../../.env');
+const result = dotenv.config({ path: envPath });
 
-// 设置代理环境变量（Node.js 的 fetch 会自动使用这些变量）
-process.env.HTTPS_PROXY = HTTPS_PROXY;
-process.env.HTTP_PROXY = HTTP_PROXY;
-process.env.ALL_PROXY = ALL_PROXY;
+// 调试：检查 .env 文件是否加载成功
+if (result.error) {
+  console.warn('⚠️ 加载 .env 文件失败:', result.error.message);
+  console.warn('⚠️ 尝试使用默认路径...');
+  // 如果指定路径失败，尝试默认路径
+  dotenv.config();
+} else {
+  console.log('✅ .env 文件加载成功');
+}
 
-console.log('代理设置已启用:', {
-  HTTPS_PROXY,
-  HTTP_PROXY,
-  ALL_PROXY
+// 辅助函数：隐藏密码（安全考虑）
+const maskUrl = (url: string): string => {
+  try {
+    const u = new URL(url);
+    if (u.password) {
+      u.password = '******';
+    }
+    return u.toString();
+  } catch {
+    return url; // 如果不是标准URL格式，原样返回
+  }
+};
+
+// 从环境变量读取代理配置（支持小写和大写）
+// 调试：打印所有代理相关的环境变量
+console.log('🔍 环境变量检查:', {
+  'HTTPS_PROXY': process.env.HTTPS_PROXY || '(未设置)',
+  'https_proxy': process.env.https_proxy || '(未设置)',
+  'HTTP_PROXY': process.env.HTTP_PROXY || '(未设置)',
+  'http_proxy': process.env.http_proxy || '(未设置)',
 });
 
-const getAiClient = () => {
-  const apiKey = process.env.API_KEY || process.env.GEMINI_API_KEY;
-  if (!apiKey) {
-    console.error("API_KEY is missing from environment variables.");
-    return null;
-  }
-  return new GoogleGenAI({ apiKey });
-};
+const proxyUrl = process.env.HTTPS_PROXY || 
+                 process.env.https_proxy || 
+                 process.env.HTTP_PROXY || 
+                 process.env.http_proxy || 
+                 '';
 
-export const initializeChat = async () => {
-  const ai = getAiClient();
-  if (!ai) throw new Error("AI Client not initialized");
-
-  chatSession = ai.chats.create({
-    model: "gemini-2.5-flash",
-    config: {
-      systemInstruction: SYSTEM_INSTRUCTION,
-      temperature: 0.1,
-    },
-  });
-
-  return chatSession;
-};
-
-export const sendMessageToGemini = async (message: string) => {
-  if (!chatSession) {
-    await initializeChat();
-  }
-
-  if (!chatSession) {
-    throw new Error("Failed to initialize chat session.");
-  }
-
-  try {
-    const response = await chatSession.sendMessage({ message });
-    return response.text;
-  } catch (error) {
-    console.error("Error sending message to Gemini:", error);
-    throw error;
-  }
-};
-
-export const sendMessageStreamToGemini = async function* (message: string) {
-  // 检查 API 密钥
-  const apiKey = process.env.API_KEY || process.env.GEMINI_API_KEY;
-  if (!apiKey) {
-    throw new Error("API_KEY 或 GEMINI_API_KEY 环境变量未设置。请检查 .env 文件。");
-  }
-
-  if (!chatSession) {
-    try {
-      await initializeChat();
-    } catch (initError) {
-      console.error("初始化聊天会话失败:", initError);
-      throw new Error(`初始化失败: ${initError instanceof Error ? initError.message : String(initError)}`);
-    }
-  }
+// 配置代理（关键步骤）
+if (proxyUrl) {
+  // 设置环境变量（为了兼容 Axios 等其他可能使用的库）
+  process.env.HTTPS_PROXY = proxyUrl;
+  process.env.HTTP_PROXY = proxyUrl;
   
-  if (!chatSession) {
-     throw new Error("聊天会话初始化失败，chatSession 为 null。");
+  // 【关键】配置 Node.js 原生 fetch 的代理
+  // Gemini SDK 使用原生 fetch，必须通过这种方式注入代理
+  try {
+    const dispatcher = new ProxyAgent(proxyUrl);
+    setGlobalDispatcher(dispatcher);
+    console.log('🔌 Undici Global Dispatcher 已配置为使用代理:', maskUrl(proxyUrl));
+  } catch (error) {
+    console.error('❌ 配置代理失败:', error);
+    console.warn('⚠️ 将尝试直接连接（可能失败）');
+  }
+} else {
+  console.log('ℹ️ 未检测到代理配置，使用直连模式');
+  // 注意：不要删除环境变量，可能影响其他库
+}
+
+// 获取 AI 客户端（单例模式）
+let aiClient: GoogleGenAI | null = null;
+
+const getAiClient = (): GoogleGenAI => {
+  if (aiClient) {
+    return aiClient;
   }
 
+  // 官方 SDK：传入空对象，自动从环境变量 GEMINI_API_KEY 读取
+  const apiKey = process.env.API_KEY || process.env.GEMINI_API_KEY;
+  if (apiKey && !process.env.GEMINI_API_KEY) {
+    // 如果使用的是 API_KEY，设置 GEMINI_API_KEY 以便 SDK 读取
+    process.env.GEMINI_API_KEY = apiKey;
+  }
+
+  if (!process.env.GEMINI_API_KEY) {
+    throw new Error("GEMINI_API_KEY 或 API_KEY 环境变量未设置。请检查 .env 文件。");
+  }
+
+  aiClient = new GoogleGenAI({});
+  return aiClient;
+};
+
+// 流式发送消息（官方 SDK 的 API）
+export const sendMessageStreamToGemini = async function* (message: string) {
   try {
     console.log("开始发送流式消息到 Gemini...");
-    const streamResult = await chatSession.sendMessageStream({ message });
+    const ai = getAiClient();
     
-    for await (const chunk of streamResult) {
-      // 检查 chunk 和 chunk.text 是否存在
-      if (!chunk) {
-        console.warn("收到空的 chunk，跳过");
-        continue;
-      }
-      
-      if (chunk.text === undefined || chunk.text === null) {
-        console.warn("chunk.text 不存在，chunk 内容:", chunk);
-        // 尝试使用其他可能的字段
-        if (typeof chunk === 'string') {
-          yield chunk;
-        } else {
-          // 跳过无效的 chunk
-          continue;
-        }
-      } else {
+    // 官方 SDK API: ai.models.generateContentStream()
+    const response = await ai.models.generateContentStream({
+      model: "gemini-2.5-flash",
+      contents: message,
+      config: {
+        systemInstruction: SYSTEM_INSTRUCTION,
+      },
+    });
+    
+    // 流式处理响应
+    for await (const chunk of response) {
+      if (chunk.text) {
         yield chunk.text;
       }
     }
@@ -113,12 +122,11 @@ export const sendMessageStreamToGemini = async function* (message: string) {
   } catch (error) {
     console.error("流处理错误详情:", error);
     
-    // 提供更详细的错误信息
     if (error instanceof Error) {
       const errorMsg = error.message.toLowerCase();
       const errorName = error.name || '';
       
-      // 检查是否是 fetch 失败错误（网络连接问题）
+      // 网络连接错误
       if (errorMsg.includes('fetch failed') || 
           errorMsg.includes('network') || 
           errorMsg.includes('econnrefused') || 
@@ -128,46 +136,37 @@ export const sendMessageStreamToGemini = async function* (message: string) {
           errorName === 'TypeError' && errorMsg.includes('fetch')) {
         
         let diagnosticMsg = "无法连接到 Gemini API 服务器。";
-        diagnosticMsg += `\n当前代理设置:`;
-        diagnosticMsg += `\n  HTTPS_PROXY: ${HTTPS_PROXY}`;
-        diagnosticMsg += `\n  HTTP_PROXY: ${HTTP_PROXY}`;
-        diagnosticMsg += `\n  ALL_PROXY: ${ALL_PROXY}`;
-        diagnosticMsg += "\n\n可能的原因：";
-        diagnosticMsg += "\n1. 代理服务器未运行 - 请检查代理软件（如 V2Ray、Clash）是否正在运行";
-        diagnosticMsg += `\n2. 代理地址或端口错误 - 确认 HTTP 代理监听在 ${HTTPS_PROXY}，SOCKS5 代理监听在 ${ALL_PROXY}`;
-        diagnosticMsg += "\n3. 代理需要认证但未配置 - 如果代理需要用户名密码，请修改代码中的代理配置";
-        diagnosticMsg += "\n4. SSL/TLS 证书验证失败 - 某些代理可能需要禁用证书验证";
-        diagnosticMsg += "\n\n排查步骤：";
-        diagnosticMsg += "\n1. 测试 HTTP 代理是否可用（在终端运行以下命令）:";
-        diagnosticMsg += `\n   curl -x "${HTTPS_PROXY}" https://www.google.com`;
-        diagnosticMsg += "\n2. 测试 SOCKS5 代理是否可用:";
-        diagnosticMsg += `\n   curl --socks5-hostname "${ALL_PROXY.replace('socks5://', '')}" https://www.google.com`;
-        diagnosticMsg += "\n3. 检查代理软件日志，查看是否有错误";
-        diagnosticMsg += "\n4. 确认代理软件允许本地连接";
-        diagnosticMsg += "\n5. 如果代理地址不同，请修改代码中的代理配置常量";
-        
-        diagnosticMsg += "\n\n建议：";
-        diagnosticMsg += "\n- 检查网络连接是否正常（可以尝试 ping google.com）";
-        diagnosticMsg += "\n- 如果使用代理，请检查代理配置是否正确";
-        diagnosticMsg += "\n- 确认代理服务器可以访问（如果配置了代理）";
-        diagnosticMsg += "\n- 检查防火墙设置，确保允许 HTTPS 连接";
-        diagnosticMsg += `\n- 查看后端控制台的详细错误信息: ${error.message}`;
-        diagnosticMsg += "\n- 如果在中国大陆，可能需要配置代理才能访问 Google API";
+        if (proxyUrl) {
+          diagnosticMsg += `\n当前代理设置: ${maskUrl(proxyUrl)}`;
+          diagnosticMsg += "\n\n可能的原因：";
+          diagnosticMsg += "\n1. 代理服务器未运行 - 请检查代理软件（如 V2Ray、Clash）是否正在运行";
+          diagnosticMsg += `\n2. 代理地址或端口错误 - 确认代理监听在 ${maskUrl(proxyUrl)}`;
+          diagnosticMsg += "\n3. 代理需要认证但未配置 - 如果代理需要用户名密码，请在 .env 文件中配置";
+          diagnosticMsg += "\n4. Undici ProxyAgent 配置失败 - 检查代理 URL 格式是否正确";
+        } else {
+          diagnosticMsg += "\n未配置代理。";
+          diagnosticMsg += "\n\n可能的原因：";
+          diagnosticMsg += "\n1. 需要配置代理才能访问 Google API（如果在中国大陆）";
+          diagnosticMsg += "\n2. 网络连接问题 - 检查网络连接是否正常";
+          diagnosticMsg += "\n3. 防火墙阻止连接 - 检查防火墙设置";
+        }
+        diagnosticMsg += "\n\n⚠️ SSL/TLS 证书验证失败也可能导致此错误";
+        diagnosticMsg += `\n\n详细错误信息: ${error.message}`;
         
         throw new Error(diagnosticMsg);
       }
       
-      // 检查是否是 API 密钥相关错误
+      // API 密钥错误
       if (errorMsg.includes('api key') || errorMsg.includes('authentication') || errorMsg.includes('unauthorized')) {
-        throw new Error("API 密钥无效或已过期。请检查环境变量中的 API_KEY 或 GEMINI_API_KEY。");
+        throw new Error("API 密钥无效或已过期。请检查环境变量中的 GEMINI_API_KEY 或 API_KEY。");
       }
       
-      // 检查是否是模型相关错误
+      // 模型错误
       if (errorMsg.includes('model') || errorMsg.includes('not found') || errorMsg.includes('invalid model')) {
         throw new Error(`模型错误: ${error.message}。请检查模型名称是否正确（当前使用: gemini-2.5-flash）。`);
       }
       
-      // 检查是否是 SSL/TLS 错误
+      // SSL/TLS 错误
       if (errorMsg.includes('certificate') || errorMsg.includes('ssl') || errorMsg.includes('tls')) {
         throw new Error(`SSL/TLS 错误: ${error.message}。可能是证书验证失败，请检查代理或网络配置。`);
       }
@@ -176,5 +175,35 @@ export const sendMessageStreamToGemini = async function* (message: string) {
     // 如果无法识别错误类型，返回原始错误信息
     throw new Error(`流处理失败: ${error instanceof Error ? error.message : String(error)}`);
   }
-}
+};
 
+// 非流式发送消息（如果还需要的话）
+export const sendMessageToGemini = async (message: string): Promise<string> => {
+  try {
+    const ai = getAiClient();
+    // 官方 SDK API: ai.models.generateContent()
+    const response = await ai.models.generateContent({
+      model: "gemini-2.5-flash",
+      contents: message,
+      config: {
+        systemInstruction: SYSTEM_INSTRUCTION,
+      },
+    });
+    // response.text 可能为 undefined，需要处理
+    if (!response.text) {
+      throw new Error("API 响应中没有文本内容");
+    }
+    return response.text;
+  } catch (error) {
+    console.error("Error sending message to Gemini:", error);
+    throw error;
+  }
+};
+
+// 保留旧接口以保持兼容性（如果需要）
+export const initializeChat = async () => {
+  // 官方 SDK 不需要预先初始化 chat session
+  // 这个函数保留只是为了兼容性
+  console.warn("initializeChat() is deprecated in official SDK. Model will be initialized on demand.");
+  return null;
+};
