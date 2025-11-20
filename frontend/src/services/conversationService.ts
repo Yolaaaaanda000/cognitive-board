@@ -7,9 +7,11 @@ import { fetchMessagesForConversation } from './messageService'
 export async function fetchConversations(userId: string): Promise<Conversation[]> {
   if (!isSupabaseConfigured() || !supabase) {
     // 如果 Supabase 未配置，返回空数组（降级到 localStorage）
+    console.warn('⚠️ fetchConversations: Supabase 未配置，返回空数组');
     return []
   }
 
+  console.log('🔄 从数据库获取对话，用户 ID:', userId);
   const { data, error } = await supabase
     .from('conversations')
     .select('*')
@@ -17,9 +19,12 @@ export async function fetchConversations(userId: string): Promise<Conversation[]
     .order('updated_at', { ascending: false })
 
   if (error) {
-    console.error('Error fetching conversations:', error)
+    console.error('❌ Error fetching conversations:', error)
+    console.error('   错误详情:', JSON.stringify(error, null, 2));
     throw error
   }
+  
+  console.log('✅ 成功获取对话，数量:', data?.length || 0);
 
   // 需要加载每个对话的 notes 和 messages
   const conversations: Conversation[] = []
@@ -48,9 +53,11 @@ export async function createConversation(
   title: string
 ): Promise<Conversation> {
   if (!isSupabaseConfigured() || !supabase) {
+    console.error('❌ createConversation: Supabase 未配置');
     throw new Error('Supabase is not configured')
   }
 
+  console.log('💾 创建新对话到数据库:', { userId, title });
   const { data, error } = await supabase
     .from('conversations')
     .insert({
@@ -61,9 +68,12 @@ export async function createConversation(
     .single()
 
   if (error) {
-    console.error('Error creating conversation:', error)
+    console.error('❌ Error creating conversation:', error)
+    console.error('   错误详情:', JSON.stringify(error, null, 2));
     throw error
   }
+  
+  console.log('✅ 对话已成功保存到数据库:', data.id);
 
   return {
     id: data.id,

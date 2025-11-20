@@ -324,12 +324,17 @@ function Workspace({ user, onLogout }: WorkspaceProps) {
 
   // --- Conversation Management Functions ---
   const createNewConversation = async () => {
-    if (!user?.id) return;
+    if (!user?.id) {
+      console.warn('⚠️ createNewConversation: 用户未登录');
+      return;
+    }
 
     const newTitle = `对话 ${conversations.length + 1}`;
+    console.log('➕ 创建新对话:', newTitle);
     
     if (isSupabaseConfigured() && supabase) {
       try {
+        console.log('💾 尝试保存对话到数据库...');
         // 保存到数据库
         const newConv = await createConversation(user.id, newTitle);
         const defaultMessage: Message = {
@@ -346,12 +351,15 @@ function Workspace({ user, onLogout }: WorkspaceProps) {
         setConversations(prev => [...prev, newConv]);
         setActiveConversationId(newConv.id);
         loadConversation(newConv.id);
+        console.log('✅ 对话创建完成');
       } catch (error) {
-        console.error('Error creating conversation:', error);
+        console.error('❌ Error creating conversation:', error);
+        console.warn('⚠️ 降级到 localStorage');
         // 降级到 localStorage
         createLocalConversation();
       }
     } else {
+      console.warn('⚠️ Supabase 未配置，使用 localStorage');
       // 降级到 localStorage
       createLocalConversation();
     }
@@ -570,12 +578,19 @@ function Workspace({ user, onLogout }: WorkspaceProps) {
     
     // Load conversations from database or localStorage
     const loadData = async () => {
+      console.log('📂 开始加载对话数据...');
+      console.log('   Supabase 配置状态:', isSupabaseConfigured() ? '✅ 已配置' : '❌ 未配置');
+      console.log('   当前用户 ID:', user?.id);
+      
       if (isSupabaseConfigured() && supabase) {
         try {
+          console.log('🔄 尝试从数据库加载对话...');
           // 从数据库加载对话
           const dbConversations = await fetchConversations(user.id);
+          console.log('📊 从数据库加载的对话数量:', dbConversations.length);
           
           if (dbConversations.length > 0) {
+            console.log('✅ 成功从数据库加载对话');
             setConversations(dbConversations);
             const activeId = localStorage.getItem('tf_active_conversation_id');
             const targetId = activeId && dbConversations.find(c => c.id === activeId)
@@ -583,8 +598,10 @@ function Workspace({ user, onLogout }: WorkspaceProps) {
               : dbConversations[0].id;
             loadConversation(targetId, dbConversations);
           } else {
+            console.log('ℹ️ 数据库中没有对话，创建默认对话...');
             // 创建默认对话
             const newConv = await createConversation(user.id, `对话 1`);
+            console.log('✅ 已创建默认对话:', newConv.id);
             const defaultMessage: Message = {
               id: '1',
               role: 'ai',
@@ -593,16 +610,19 @@ function Workspace({ user, onLogout }: WorkspaceProps) {
               timestamp: Date.now()
             };
             await createMessage(newConv.id, user.id, defaultMessage);
+            console.log('✅ 已创建默认消息');
             const convs = [newConv];
             setConversations(convs);
             loadConversation(newConv.id, convs);
           }
         } catch (error) {
-          console.error('Error loading conversations from database:', error);
+          console.error('❌ 从数据库加载对话失败:', error);
+          console.warn('⚠️ 降级到 localStorage');
           // 降级到 localStorage
           const storedConversations = localStorage.getItem('tf_conversations');
           if (storedConversations) {
             const parsed = JSON.parse(storedConversations);
+            console.log('📦 从 localStorage 加载对话:', parsed.length, '个');
             setConversations(parsed);
             const activeId = localStorage.getItem('tf_active_conversation_id');
             if (activeId && parsed.find((c: Conversation) => c.id === activeId)) {
@@ -617,10 +637,12 @@ function Workspace({ user, onLogout }: WorkspaceProps) {
           }
         }
       } else {
+        console.warn('⚠️ Supabase 未配置，使用 localStorage');
         // 降级到 localStorage
         const storedConversations = localStorage.getItem('tf_conversations');
         if (storedConversations) {
           const parsed = JSON.parse(storedConversations);
+          console.log('📦 从 localStorage 加载对话:', parsed.length, '个');
           setConversations(parsed);
           const activeId = localStorage.getItem('tf_active_conversation_id');
           if (activeId && parsed.find((c: Conversation) => c.id === activeId)) {
@@ -1093,15 +1115,38 @@ function Workspace({ user, onLogout }: WorkspaceProps) {
       }
 
       // Final update to ensure agent is set correctly after stream completes
+      let finalAiMessage: Message | null = null;
       setMessages(prev => prev.map(msg => {
         if (msg.id !== responseId) return msg;
-        return { 
+        const updated = { 
           ...msg, 
           isStreaming: false,
           // Use final detected agent if available, otherwise keep current
           agent: finalDetectedAgent || msg.agent
         };
+        finalAiMessage = updated;
+        return updated;
       }));
+      
+      // 保存 AI 消息到数据库（流式处理完成后）
+      if (finalAiMessage && activeConversationId && user?.id) {
+        // 先尝试创建消息（如果不存在），然后更新
+        createMessage(activeConversationId, user.id, finalAiMessage).catch(error => {
+          console.error('Failed to save AI message:', error);
+          // 如果创建失败（可能是已存在或主键冲突），尝试更新
+          if (error && (error.code === '23505' || error.message?.includes('duplicate'))) {
+            // 主键冲突，说明消息已存在，更新它
+            updateMessage(responseId, finalAiMessage, user.id).catch(updateError => {
+              console.error('Failed to update AI message:', updateError);
+            });
+          } else {
+            // 其他错误，也尝试更新（可能是流式过程中已创建）
+            updateMessage(responseId, finalAiMessage, user.id).catch(updateError => {
+              console.error('Failed to update AI message:', updateError);
+            });
+          }
+        });
+      }
 
     } catch (e) {
       console.error('Stream error:', e);
@@ -1235,6 +1280,14 @@ function Workspace({ user, onLogout }: WorkspaceProps) {
       referencedFiles: allReferencedFileIds.length > 0 ? allReferencedFileIds : undefined
     };
     setMessages(prev => [...prev, userMsg]);
+    
+    // 保存用户消息到数据库
+    if (activeConversationId && user?.id) {
+      createMessage(activeConversationId, user.id, userMsg).catch(error => {
+        console.error('Failed to save user message:', error);
+      });
+    }
+    
     setInputVal('');
     setSelectedFileIds([]); // Clear selected files after sending
 

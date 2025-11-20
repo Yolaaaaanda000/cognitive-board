@@ -39,6 +39,7 @@ export async function createMessage(
   message: Omit<Message, 'id'> & { id?: string }
 ): Promise<Message> {
   if (!isSupabaseConfigured() || !supabase) {
+    console.warn('⚠️ createMessage: Supabase 未配置，消息未保存到数据库');
     // 降级：返回消息对象（不保存到数据库）
     return {
       ...message,
@@ -47,6 +48,8 @@ export async function createMessage(
   }
 
   const messageId = message.id || `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`
+  
+  console.log('💾 保存消息到数据库:', { conversationId, userId, role: message.role, contentLength: message.content?.length || 0 });
 
   const { data, error } = await supabase
     .from('messages')
@@ -66,13 +69,16 @@ export async function createMessage(
     .single()
 
   if (error) {
-    console.error('Error creating message:', error)
+    console.error('❌ Error creating message:', error)
+    console.error('   错误详情:', JSON.stringify(error, null, 2));
     // 降级：返回消息对象
     return {
       ...message,
       id: messageId
     }
   }
+  
+  console.log('✅ 消息已成功保存到数据库:', data.id);
 
   return {
     id: data.id,
