@@ -294,6 +294,27 @@ function Workspace({ user, onLogout }: WorkspaceProps) {
   const [isLeftOpen, setIsLeftOpen] = useState<boolean>(true);
   const [isRightOpen, setIsRightOpen] = useState<boolean>(true);
   
+  // --- User Profile State ---
+  const [showSignOut, setShowSignOut] = useState<boolean>(false);
+  const userProfileRef = useRef<HTMLDivElement>(null);
+  
+  // 点击外部关闭 signout 按钮
+  useEffect(() => {
+    const handleClickOutside = (event: MouseEvent) => {
+      if (userProfileRef.current && !userProfileRef.current.contains(event.target as Node)) {
+        setShowSignOut(false);
+      }
+    };
+    
+    if (showSignOut) {
+      document.addEventListener('mousedown', handleClickOutside);
+    }
+    
+    return () => {
+      document.removeEventListener('mousedown', handleClickOutside);
+    };
+  }, [showSignOut]);
+  
   // --- Chat & UI State (from active conversation) ---
   const [messages, setMessages] = useState<Message[]>([
     {
@@ -1434,18 +1455,23 @@ function Workspace({ user, onLogout }: WorkspaceProps) {
         
         {/* User Profile */}
         <div className="p-2 border-t border-gray-200 bg-white">
-          <div className="relative group">
-            <button className="w-full px-3 py-2 rounded-lg hover:bg-gray-100 transition flex items-center gap-2">
+          <div className="relative" ref={userProfileRef}>
+            <button 
+              onClick={() => setShowSignOut(!showSignOut)}
+              className="w-full px-3 py-2 rounded-lg hover:bg-gray-100 transition flex items-center gap-2"
+            >
               <div className="w-8 h-8 rounded-full bg-gradient-to-tr from-purple-400 to-blue-500 shadow-md flex items-center justify-center text-white text-xs font-bold">
                 {user.name.charAt(0)}
               </div>
               <span className="text-sm font-medium text-gray-700 flex-1 text-left truncate">{user.name}</span>
             </button>
-            <div className="absolute left-0 bottom-full mb-2 w-full bg-white rounded-lg shadow-xl border border-gray-100 py-1 hidden group-hover:block z-50">
-              <button onClick={onLogout} className="w-full text-left px-3 py-2 text-xs text-red-600 hover:bg-red-50 flex items-center gap-2">
-                <LogOut className="w-3 h-3" /> Sign Out
-              </button>
-            </div>
+            {showSignOut && (
+              <div className="absolute left-0 bottom-full mb-2 w-full bg-white rounded-lg shadow-xl border border-gray-100 py-1 z-50">
+                <button onClick={onLogout} className="w-full text-left px-3 py-2 text-xs text-red-600 hover:bg-red-50 flex items-center gap-2">
+                  <LogOut className="w-3 h-3" /> Sign Out
+                </button>
+              </div>
+            )}
           </div>
         </div>
       </div>

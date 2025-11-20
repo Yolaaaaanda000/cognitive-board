@@ -258,8 +258,8 @@ export default function AuthPage({ onLogin }: AuthPageProps) {
                <button 
                  onClick={() => {
                    setName('Demo User');
-                   setEmail('demo@example.com');
-                   setPassword('password');
+                   setEmail('demo@demo.com');
+                   setPassword('demo123456');
                    setIsLogin(true);
                  }}
                  className="text-xs text-gray-400 hover:text-indigo-500 transition-colors"
