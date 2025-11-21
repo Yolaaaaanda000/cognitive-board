@@ -1665,7 +1665,7 @@ function Workspace({ user, onLogout }: WorkspaceProps) {
                 </div>
               )}
 
-              <div className="relative bg-white border border-gray-300 rounded-2xl shadow-lg focus-within:shadow-xl focus-within:border-indigo-500 transition-all">
+              <div className="relative bg-white border border-gray-300 rounded-2xl shadow-lg transition-all">
                 <input
                   ref={fileInputRef}
                   type="file"
@@ -1677,7 +1677,7 @@ function Workspace({ user, onLogout }: WorkspaceProps) {
 
                 <textarea
                   ref={inputRef}
-                  className="w-full bg-transparent border-none focus:ring-0 resize-none py-4 pl-4 pr-32 max-h-48 text-base text-gray-800 placeholder-gray-400"
+                  className="w-full bg-transparent border-none focus:ring-0 focus:outline-none resize-none py-4 pl-4 pr-32 max-h-48 text-base text-gray-800 placeholder-gray-400"
                   placeholder={`Ask ${activeAgent}...`}
                   rows={1}
                   value={inputVal}
