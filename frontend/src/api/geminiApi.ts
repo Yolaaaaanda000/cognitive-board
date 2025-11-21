@@ -7,7 +7,8 @@ const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ||
 export const sendMessageStreamToGemini = async function* (
   message: string,
   conversationHistory?: Array<{role: string, parts: Array<{text: string}>}>,
-  thoughtSignature?: string
+  thoughtSignature?: string,
+  abortSignal?: AbortSignal
 ) {
   const response = await fetch(`${API_BASE_URL}/api/gemini/stream`, {
     method: 'POST',
@@ -19,6 +20,7 @@ export const sendMessageStreamToGemini = async function* (
       conversationHistory,
       thoughtSignature
     }),
+    signal: abortSignal,
   });
 
   if (!response.ok) {
@@ -35,6 +37,12 @@ export const sendMessageStreamToGemini = async function* (
   let buffer = '';
 
   while (true) {
+    // Check if aborted
+    if (abortSignal?.aborted) {
+      reader.cancel();
+      break;
+    }
+    
     const { done, value } = await reader.read();
     
     if (done) break;

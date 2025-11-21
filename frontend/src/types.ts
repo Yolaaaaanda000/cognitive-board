@@ -39,6 +39,7 @@ export interface SelectionState {
   x: number;
   y: number;
   text: string;
+  isInChat?: boolean; // Whether selection is in chat messages area
 }
 
 // Conversation/Session Management

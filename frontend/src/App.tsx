@@ -30,7 +30,9 @@ import {
   Copy,
   PanelLeft,
   PanelRight,
-  Paperclip
+  Paperclip,
+  Square,
+  RefreshCw
 } from './components/Icons';
 import { sendMessageStreamToGemini } from './api/geminiApi';
 import { processFileUpload, formatFileSize } from './services/fileService';
@@ -336,6 +338,7 @@ function Workspace({ user, onLogout }: WorkspaceProps) {
   const [copySuccess, setCopySuccess] = useState(false); // Copy success feedback
   const [pendingFiles, setPendingFiles] = useState<File[]>([]); // Files waiting to be uploaded (staging area)
   const [isDragging, setIsDragging] = useState(false); // Drag and drop state
+  const [abortController, setAbortController] = useState<AbortController | null>(null); // For stopping stream
 
   const editorRef = useRef<HTMLDivElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -971,9 +974,29 @@ function Workspace({ user, onLogout }: WorkspaceProps) {
     return newId;
   };
 
+  // --- Stop Stream Function ---
+  const handleStopStream = () => {
+    if (abortController) {
+      abortController.abort();
+      setAbortController(null);
+      setIsThinking(false);
+      
+      // Update the streaming message to mark it as stopped
+      setMessages(prev => prev.map(msg => 
+        msg.isStreaming 
+          ? { ...msg, isStreaming: false } 
+          : msg
+      ));
+    }
+  };
+
   // --- AI Stream Logic ---
   const handleAIStream = async (agent: AgentType, prompt: string, targetNoteId?: string) => {
     setIsThinking(true);
+    
+    // Create new AbortController for this stream
+    const controller = new AbortController();
+    setAbortController(controller);
     
     const responseId = Date.now().toString() + '-ai';
 
@@ -1002,12 +1025,17 @@ function Workspace({ user, onLogout }: WorkspaceProps) {
           parts: [{ text: msg.content }]
         }));
       
-      // 调用 API，传递对话历史和 Thought Signature
-      const stream = sendMessageStreamToGemini(prompt, conversationHistory, thoughtSignature);
+      // 调用 API，传递对话历史、Thought Signature 和 AbortSignal
+      const stream = sendMessageStreamToGemini(prompt, conversationHistory, thoughtSignature, controller.signal);
       let rawAccumulated = '';
       let lastThoughtSignature: string | undefined;
       
       for await (const chunk of stream) {
+        // Check if aborted
+        if (controller.signal.aborted) {
+          break;
+        }
+        
         if (!chunk) continue;
         
         // 处理返回的 chunk 对象（包含 text 和 thoughtSignature）
@@ -1201,6 +1229,12 @@ function Workspace({ user, onLogout }: WorkspaceProps) {
       }
 
     } catch (e) {
+      // If aborted, don't show error
+      if (controller.signal.aborted) {
+        console.log('Stream aborted by user');
+        return;
+      }
+      
       console.error('Stream error:', e);
       let errorMessage: string;
       
@@ -1233,6 +1267,7 @@ function Workspace({ user, onLogout }: WorkspaceProps) {
       ));
     } finally {
       setIsThinking(false);
+      setAbortController(null);
     }
   };
 
@@ -1246,14 +1281,17 @@ function Workspace({ user, onLogout }: WorkspaceProps) {
       return;
     }
 
-    // Hide menu if selection is not within the editor
-    if (!editorRef.current?.contains(sel.anchorNode)) {
+    const text = sel.toString();
+    if (text.trim().length === 0) {
       setSelection({ isVisible: false, x: 0, y: 0, text: '' });
       return;
     }
 
-    const text = sel.toString();
-    if (text.trim().length === 0) {
+    // Check if selection is within the editor (left panel) or chat messages (right panel)
+    const isInEditor = editorRef.current?.contains(sel.anchorNode);
+    const isInChat = chatContainerRef.current?.contains(sel.anchorNode);
+    
+    if (!isInEditor && !isInChat) {
       setSelection({ isVisible: false, x: 0, y: 0, text: '' });
       return;
     }
@@ -1265,7 +1303,8 @@ function Workspace({ user, onLogout }: WorkspaceProps) {
       isVisible: true,
       x: rect.left + (rect.width / 2),
       y: rect.top - 10, 
-      text: text
+      text: text,
+      isInChat: isInChat || false // Add flag to indicate if selection is in chat
     });
   };
 
@@ -1273,6 +1312,13 @@ function Workspace({ user, onLogout }: WorkspaceProps) {
   const handleBranchOut = (selectedAgent: AgentType) => {
      setSelection({ ...selection, isVisible: false });
      
+     // If selection is in chat, just send the selected text as a new message
+     if (selection.isInChat) {
+       handleSendMessage(selection.text);
+       return;
+     }
+     
+     // Otherwise, create a branch node (for note editor selections)
      // 1. Create Child Node
      const childId = spawnChildNote(activeNoteId, `Thinking about: "${selection.text.substring(0, 15)}..."`, "Generating analysis...");
      
@@ -1535,6 +1581,7 @@ function Workspace({ user, onLogout }: WorkspaceProps) {
           onDragOver={handleDragOver}
           onDragLeave={handleDragLeave}
           onDrop={handleDrop}
+          onMouseUp={handleMouseUp}
         >
           {/* Drag Overlay */}
           {isDragging && (
@@ -1586,7 +1633,7 @@ function Workspace({ user, onLogout }: WorkspaceProps) {
                        )}
                        
                        <div className={`
-                         relative px-5 py-3.5 rounded-2xl text-sm leading-relaxed shadow-sm
+                         relative px-5 py-3.5 rounded-2xl text-sm leading-relaxed shadow-sm group
                          ${isUser 
                            ? 'bg-gray-100 text-gray-900 rounded-br-none' 
                            : 'bg-white border border-gray-200 text-gray-800 rounded-tl-none shadow-sm'
@@ -1602,6 +1649,36 @@ function Workspace({ user, onLogout }: WorkspaceProps) {
                                </span>
                             )}
                          </div>
+                         
+                         {/* Action buttons for AI messages - only show on hover */}
+                         {!isUser && !msg.isStreaming && msg.content && (
+                           <div className="absolute top-2 right-2 flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                             <button
+                               onClick={async () => {
+                                 try {
+                                   await navigator.clipboard.writeText(msg.content);
+                                   setCopySuccess(true);
+                                   setTimeout(() => setCopySuccess(false), 2000);
+                                 } catch (err) {
+                                   console.error('Failed to copy:', err);
+                                 }
+                               }}
+                               className="p-1.5 hover:bg-gray-100 rounded-md transition-colors"
+                               title="Copy"
+                             >
+                               <Copy className="w-3.5 h-3.5 text-gray-500 hover:text-gray-700" />
+                             </button>
+                             <button
+                               onClick={() => {
+                                 handleSendMessage(msg.content);
+                               }}
+                               className="p-1.5 hover:bg-gray-100 rounded-md transition-colors"
+                               title="Regenerate"
+                             >
+                               <RefreshCw className="w-3.5 h-3.5 text-gray-500 hover:text-gray-700" />
+                             </button>
+                           </div>
+                         )}
                        </div>
                     </div>
                   </div>
@@ -1767,18 +1844,29 @@ function Workspace({ user, onLogout }: WorkspaceProps) {
                     <Paperclip className="w-5 h-5" />
                   </button>
 
-                  {/* Send Button */}
-                  <button 
-                    className={`p-2 rounded-xl transition-all duration-200 ${
-                      (inputVal.trim() || selectedFileIds.length > 0 || pendingFiles.length > 0) && !isThinking 
-                        ? 'bg-black text-white hover:bg-gray-800' 
-                        : 'bg-gray-100 text-gray-300 cursor-not-allowed'
-                    }`}
-                    onClick={() => handleSendMessage()}
-                    disabled={!inputVal.trim() && selectedFileIds.length === 0 && pendingFiles.length === 0 || isThinking}
-                  >
-                    <ArrowRight className="w-5 h-5" />
-                  </button>
+                  {/* Send/Stop Button */}
+                  {isThinking ? (
+                    <button 
+                      className="p-2 rounded-xl transition-all duration-200 bg-red-500 text-white hover:bg-red-600"
+                      onClick={handleStopStream}
+                      title="Stop generating"
+                    >
+                      <Square className="w-5 h-5" />
+                    </button>
+                  ) : (
+                    <button 
+                      className={`p-2 rounded-xl transition-all duration-200 ${
+                        (inputVal.trim() || selectedFileIds.length > 0 || pendingFiles.length > 0)
+                          ? 'bg-black text-white hover:bg-gray-800' 
+                          : 'bg-gray-100 text-gray-300 cursor-not-allowed'
+                      }`}
+                      onClick={() => handleSendMessage()}
+                      disabled={!inputVal.trim() && selectedFileIds.length === 0 && pendingFiles.length === 0}
+                      title="Send message"
+                    >
+                      <ArrowRight className="w-5 h-5" />
+                    </button>
+                  )}
                 </div>
               </div>
               <div className="text-center mt-3 text-xs text-gray-400">
@@ -2022,11 +2110,15 @@ function Workspace({ user, onLogout }: WorkspaceProps) {
                     style={{ top: selection.y - 5, left: selection.x }}
                   >
                      <div className="flex p-1 space-x-1">
-                        <MenuButton icon={Network} label="Branch Out" onClick={() => handleBranchOut('Manager')} activeColor="text-indigo-600" />
-                        <div className="w-px bg-gray-200 mx-1 my-1"></div>
+                        {!selection.isInChat && (
+                          <>
+                            <MenuButton icon={Network} label="Branch Out" onClick={() => handleBranchOut('Manager')} activeColor="text-indigo-600" />
+                            <div className="w-px bg-gray-200 mx-1 my-1"></div>
+                          </>
+                        )}
                         <MenuButton 
                           icon={MessageSquare} 
-                          label={`Ask ${activeAgent === 'Manager' ? 'AI' : activeAgent}`} 
+                          label={selection.isInChat ? "Ask AI" : `Ask ${activeAgent === 'Manager' ? 'AI' : activeAgent}`} 
                           onClick={() => handleBranchOut(activeAgent)} 
                         />
                      </div>
