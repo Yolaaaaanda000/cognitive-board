@@ -329,6 +329,7 @@ function Workspace({ user, onLogout }: WorkspaceProps) {
   const [selection, setSelection] = useState<SelectionState>({ isVisible: false, x: 0, y: 0, text: '' });
   const [isThinking, setIsThinking] = useState(false);
   const [activeAgent, setActiveAgent] = useState<AgentType>('Manager');
+  const [thoughtSignature, setThoughtSignature] = useState<string | undefined>(undefined); // 保存 Thought Signature
   const [isDetailViewOpen, setIsDetailViewOpen] = useState(false); // For detailed editing
   const [selectedFileIds, setSelectedFileIds] = useState<string[]>([]); // Files selected for reference
   const [showFileSelector, setShowFileSelector] = useState(false); // Show file selector dropdown
@@ -425,6 +426,7 @@ function Workspace({ user, onLogout }: WorkspaceProps) {
         setMessages(dbMessages);
         setUploadedFiles(dbFiles);
         setActiveConversationId(conversationId);
+        setThoughtSignature(undefined); // 切换对话时重置 Thought Signature
         
         if (dbNotes.length > 0) {
           setActiveNoteId(dbNotes[0].id);
@@ -448,6 +450,7 @@ function Workspace({ user, onLogout }: WorkspaceProps) {
       setNotes(conv.notes);
       setMessages(conv.messages);
       setActiveConversationId(conversationId);
+      setThoughtSignature(undefined); // 切换对话时重置 Thought Signature
       if (conv.notes.length > 0) {
         setActiveNoteId(conv.notes[0].id);
       } else {
@@ -991,12 +994,35 @@ function Workspace({ user, onLogout }: WorkspaceProps) {
     let finalDetectedAgent: AgentType | null = null; // Track final detected agent
 
     try {
-      const stream = sendMessageStreamToGemini(prompt);
+      // 构建对话历史（转换为 Gemini API 格式）
+      const conversationHistory = messages
+        .filter(msg => msg.role === 'user' || msg.role === 'ai')
+        .map(msg => ({
+          role: msg.role === 'user' ? 'user' : 'model',
+          parts: [{ text: msg.content }]
+        }));
+      
+      // 调用 API，传递对话历史和 Thought Signature
+      const stream = sendMessageStreamToGemini(prompt, conversationHistory, thoughtSignature);
       let rawAccumulated = '';
+      let lastThoughtSignature: string | undefined;
       
       for await (const chunk of stream) {
         if (!chunk) continue;
-        rawAccumulated += chunk;
+        
+        // 处理返回的 chunk 对象（包含 text 和 thoughtSignature）
+        const chunkText = typeof chunk === 'string' ? chunk : chunk.text || '';
+        const chunkThoughtSignature = typeof chunk === 'object' ? chunk.thoughtSignature : undefined;
+        
+        // 保存 Thought Signature（如果存在）
+        if (chunkThoughtSignature) {
+          lastThoughtSignature = chunkThoughtSignature;
+          setThoughtSignature(chunkThoughtSignature);
+        }
+        
+        if (chunkText) {
+          rawAccumulated += chunkText;
+        }
 
         // --- 0. Check for Automatic Branching Tag ---
         // Syntax: <create_branch title="Title Here" />
@@ -1133,6 +1159,11 @@ function Workspace({ user, onLogout }: WorkspaceProps) {
               } 
             : msg
         ));
+      }
+
+      // 保存最后的 Thought Signature（如果存在）
+      if (lastThoughtSignature) {
+        setThoughtSignature(lastThoughtSignature);
       }
 
       // Final update to ensure agent is set correctly after stream completes

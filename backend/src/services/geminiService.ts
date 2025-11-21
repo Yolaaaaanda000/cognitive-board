@@ -98,26 +98,74 @@ const getAiClient = (): GoogleGenAI => {
 };
 
 // 流式发送消息（官方 SDK 的 API）
-export const sendMessageStreamToGemini = async function* (message: string) {
+// 支持对话历史和 Thought Signature
+export const sendMessageStreamToGemini = async function* (
+  message: string,
+  conversationHistory?: Array<{role: string, parts: Array<{text: string}>}>,
+  thoughtSignature?: string
+) {
   try {
-    console.log("开始发送流式消息到 Gemini...");
+    console.log("开始发送流式消息到 Gemini 3 Pro Preview...");
     const ai = getAiClient();
+    
+    // 构建完整的对话历史
+    let contents: any;
+    if (conversationHistory && conversationHistory.length > 0) {
+      // 如果有对话历史，构建完整的对话上下文
+      contents = [
+        ...conversationHistory,
+        { role: 'user', parts: [{ text: message }] }
+      ];
+    } else {
+      // 如果没有历史，使用简单的字符串格式
+      contents = message;
+    }
+    
+    // 构建配置对象
+    const config: any = {
+      systemInstruction: SYSTEM_INSTRUCTION,
+    };
+    
+    // 如果有 Thought Signature，添加到配置中
+    if (thoughtSignature) {
+      config.thoughtSignature = thoughtSignature;
+      console.log("使用 Thought Signature 保持上下文连续性");
+    }
     
     // 官方 SDK API: ai.models.generateContentStream()
     const response = await ai.models.generateContentStream({
-      model: "gemini-2.5-flash",
-      contents: message,
-      config: {
-        systemInstruction: SYSTEM_INSTRUCTION,
-      },
+      model: "gemini-3-pro-preview", // 使用 Gemini 3 Pro Preview
+      contents: contents,
+      config: config,
     });
+    
+    let lastThoughtSignature: string | undefined;
     
     // 流式处理响应
     for await (const chunk of response) {
+      // 提取 Thought Signature（如果存在）
+      if ((chunk as any).thoughtSignature) {
+        lastThoughtSignature = (chunk as any).thoughtSignature;
+      }
+      
       if (chunk.text) {
-        yield chunk.text;
+        // 返回文本和 Thought Signature（如果存在）
+        yield {
+          text: chunk.text,
+          thoughtSignature: lastThoughtSignature
+        };
       }
     }
+    
+    // 如果最后有 Thought Signature，在结束时也返回一次
+    if (lastThoughtSignature) {
+      yield {
+        text: '',
+        thoughtSignature: lastThoughtSignature,
+        done: true
+      };
+    }
+    
     console.log("流式消息处理完成");
   } catch (error) {
     console.error("流处理错误详情:", error);
@@ -163,7 +211,7 @@ export const sendMessageStreamToGemini = async function* (message: string) {
       
       // 模型错误
       if (errorMsg.includes('model') || errorMsg.includes('not found') || errorMsg.includes('invalid model')) {
-        throw new Error(`模型错误: ${error.message}。请检查模型名称是否正确（当前使用: gemini-2.5-flash）。`);
+        throw new Error(`模型错误: ${error.message}。请检查模型名称是否正确（当前使用: gemini-3-pro-preview）。如果该模型不可用，请检查 API 密钥是否有权限访问 Gemini 3 Pro Preview。`);
       }
       
       // SSL/TLS 错误
@@ -178,22 +226,49 @@ export const sendMessageStreamToGemini = async function* (message: string) {
 };
 
 // 非流式发送消息（如果还需要的话）
-export const sendMessageToGemini = async (message: string): Promise<string> => {
+export const sendMessageToGemini = async (
+  message: string,
+  conversationHistory?: Array<{role: string, parts: Array<{text: string}>}>,
+  thoughtSignature?: string
+): Promise<{text: string, thoughtSignature?: string}> => {
   try {
     const ai = getAiClient();
+    
+    // 构建完整的对话历史
+    let contents: any;
+    if (conversationHistory && conversationHistory.length > 0) {
+      contents = [
+        ...conversationHistory,
+        { role: 'user', parts: [{ text: message }] }
+      ];
+    } else {
+      contents = message;
+    }
+    
+    const config: any = {
+      systemInstruction: SYSTEM_INSTRUCTION,
+    };
+    
+    if (thoughtSignature) {
+      config.thoughtSignature = thoughtSignature;
+    }
+    
     // 官方 SDK API: ai.models.generateContent()
     const response = await ai.models.generateContent({
-      model: "gemini-2.5-flash",
-      contents: message,
-      config: {
-        systemInstruction: SYSTEM_INSTRUCTION,
-      },
+      model: "gemini-3-pro-preview", // 使用 Gemini 3 Pro Preview
+      contents: contents,
+      config: config,
     });
+    
     // response.text 可能为 undefined，需要处理
     if (!response.text) {
       throw new Error("API 响应中没有文本内容");
     }
-    return response.text;
+    
+    return {
+      text: response.text,
+      thoughtSignature: (response as any).thoughtSignature
+    };
   } catch (error) {
     console.error("Error sending message to Gemini:", error);
     throw error;
@@ -207,3 +282,4 @@ export const initializeChat = async () => {
   console.warn("initializeChat() is deprecated in official SDK. Model will be initialized on demand.");
   return null;
 };
+

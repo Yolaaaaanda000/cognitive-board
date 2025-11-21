@@ -1,0 +1,363 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Supabase 数据存储测试</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            max-width: 800px;
+            margin: 50px auto;
+            padding: 20px;
+            background: #f5f5f5;
+        }
+        .container {
+            background: white;
+            padding: 30px;
+            border-radius: 10px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+        h1 {
+            color: #333;
+            margin-bottom: 20px;
+        }
+        .test-section {
+            margin: 20px 0;
+            padding: 15px;
+            background: #f9f9f9;
+            border-radius: 5px;
+            border-left: 4px solid #4CAF50;
+        }
+        .test-section.error {
+            border-left-color: #f44336;
+        }
+        .test-section.warning {
+            border-left-color: #ff9800;
+        }
+        button {
+            background: #4CAF50;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 16px;
+            margin: 5px;
+        }
+        button:hover {
+            background: #45a049;
+        }
+        button:disabled {
+            background: #ccc;
+            cursor: not-allowed;
+        }
+        .result {
+            margin-top: 10px;
+            padding: 10px;
+            background: white;
+            border-radius: 5px;
+            white-space: pre-wrap;
+            font-family: monospace;
+            font-size: 12px;
+            max-height: 300px;
+            overflow-y: auto;
+        }
+        .status {
+            display: inline-block;
+            padding: 5px 10px;
+            border-radius: 3px;
+            font-size: 12px;
+            font-weight: bold;
+            margin-left: 10px;
+        }
+        .status.success {
+            background: #4CAF50;
+            color: white;
+        }
+        .status.error {
+            background: #f44336;
+            color: white;
+        }
+        .status.warning {
+            background: #ff9800;
+            color: white;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🧪 Supabase 数据存储测试</h1>
+        
+        <div class="test-section">
+            <h3>1. 检查 Supabase 配置</h3>
+            <button onclick="checkSupabaseConfig()">检查配置</button>
+            <div id="config-result" class="result" style="display:none;"></div>
+        </div>
+
+        <div class="test-section">
+            <h3>2. 测试数据库连接</h3>
+            <button onclick="testDatabaseConnection()">测试连接</button>
+            <div id="connection-result" class="result" style="display:none;"></div>
+        </div>
+
+        <div class="test-section">
+            <h3>3. 测试创建对话</h3>
+            <button onclick="testCreateConversation()">创建测试对话</button>
+            <div id="create-result" class="result" style="display:none;"></div>
+        </div>
+
+        <div class="test-section">
+            <h3>4. 测试创建消息</h3>
+            <button onclick="testCreateMessage()">创建测试消息</button>
+            <div id="message-result" class="result" style="display:none;"></div>
+        </div>
+
+        <div class="test-section">
+            <h3>5. 测试创建笔记</h3>
+            <button onclick="testCreateNote()">创建测试笔记</button>
+            <div id="note-result" class="result" style="display:none;"></div>
+        </div>
+
+        <div class="test-section">
+            <h3>6. 查看所有数据</h3>
+            <button onclick="viewAllData()">查看数据</button>
+            <div id="view-result" class="result" style="display:none;"></div>
+        </div>
+    </div>
+
+    <script type="module">
+        // 从环境变量读取 Supabase 配置
+        // 注意：在实际应用中，这些应该从 .env 文件加载
+        // 这里需要手动设置或从 window.__supabase 获取
+        
+        let supabase = null;
+        
+        // 尝试从全局对象获取（如果应用已加载）
+        if (window.__supabase) {
+            supabase = window.__supabase;
+            console.log('✅ 从 window.__supabase 获取客户端');
+        } else {
+            // 尝试从环境变量创建（需要手动设置）
+            const supabaseUrl = prompt('请输入 Supabase URL:') || '';
+            const supabaseKey = prompt('请输入 Supabase Anon Key:') || '';
+            
+            if (supabaseUrl && supabaseKey) {
+                import('https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/+esm').then(({ createClient }) => {
+                    supabase = createClient(supabaseUrl, supabaseKey);
+                    window.__supabase = supabase;
+                });
+            } else {
+                alert('请先设置 Supabase 配置，或在应用页面中打开此测试页面');
+            }
+        }
+
+        window.checkSupabaseConfig = function() {
+            const resultDiv = document.getElementById('config-result');
+            resultDiv.style.display = 'block';
+            
+            if (!supabase) {
+                resultDiv.innerHTML = '❌ Supabase 客户端未初始化\n\n请确保：\n1. 在应用页面中打开此测试页面，或\n2. 手动输入 Supabase URL 和 Key';
+                resultDiv.parentElement.className = 'test-section error';
+                return;
+            }
+
+            const config = {
+                url: supabase.supabaseUrl || '已设置',
+                key: supabase.supabaseKey ? '已设置（已隐藏）' : '未设置'
+            };
+
+            resultDiv.innerHTML = `✅ Supabase 配置检查:\n\nURL: ${config.url}\nKey: ${config.key}`;
+            resultDiv.parentElement.className = 'test-section';
+        };
+
+        window.testDatabaseConnection = async function() {
+            const resultDiv = document.getElementById('connection-result');
+            resultDiv.style.display = 'block';
+            resultDiv.innerHTML = '⏳ 测试中...';
+            
+            if (!supabase) {
+                resultDiv.innerHTML = '❌ Supabase 客户端未初始化';
+                resultDiv.parentElement.className = 'test-section error';
+                return;
+            }
+
+            try {
+                // 测试查询 conversations 表
+                const { data, error } = await supabase
+                    .from('conversations')
+                    .select('count')
+                    .limit(1);
+
+                if (error) {
+                    throw error;
+                }
+
+                resultDiv.innerHTML = `✅ 数据库连接成功！\n\n响应: ${JSON.stringify(data, null, 2)}`;
+                resultDiv.parentElement.className = 'test-section';
+            } catch (error) {
+                resultDiv.innerHTML = `❌ 数据库连接失败:\n\n${error.message}\n\n详细错误:\n${JSON.stringify(error, null, 2)}`;
+                resultDiv.parentElement.className = 'test-section error';
+            }
+        };
+
+        window.testCreateConversation = async function() {
+            const resultDiv = document.getElementById('create-result');
+            resultDiv.style.display = 'block';
+            resultDiv.innerHTML = '⏳ 创建中...';
+            
+            if (!supabase) {
+                resultDiv.innerHTML = '❌ Supabase 客户端未初始化';
+                resultDiv.parentElement.className = 'test-section error';
+                return;
+            }
+
+            try {
+                // 需要用户 ID，这里使用测试 ID
+                const testUserId = prompt('请输入用户 ID（或使用测试 ID: test-user-123）:') || 'test-user-123';
+                
+                const { data, error } = await supabase
+                    .from('conversations')
+                    .insert({
+                        id: `test-${Date.now()}`,
+                        user_id: testUserId,
+                        title: '测试对话 ' + new Date().toLocaleString(),
+                        created_at: new Date().toISOString(),
+                        updated_at: new Date().toISOString()
+                    })
+                    .select()
+                    .single();
+
+                if (error) throw error;
+
+                resultDiv.innerHTML = `✅ 对话创建成功！\n\n${JSON.stringify(data, null, 2)}`;
+                resultDiv.parentElement.className = 'test-section';
+            } catch (error) {
+                resultDiv.innerHTML = `❌ 创建对话失败:\n\n${error.message}\n\n详细错误:\n${JSON.stringify(error, null, 2)}`;
+                resultDiv.parentElement.className = 'test-section error';
+            }
+        };
+
+        window.testCreateMessage = async function() {
+            const resultDiv = document.getElementById('message-result');
+            resultDiv.style.display = 'block';
+            resultDiv.innerHTML = '⏳ 创建中...';
+            
+            if (!supabase) {
+                resultDiv.innerHTML = '❌ Supabase 客户端未初始化';
+                resultDiv.parentElement.className = 'test-section error';
+                return;
+            }
+
+            try {
+                const conversationId = prompt('请输入对话 ID:') || 'test-conv-123';
+                const userId = prompt('请输入用户 ID:') || 'test-user-123';
+                
+                const { data, error } = await supabase
+                    .from('messages')
+                    .insert({
+                        id: `test-msg-${Date.now()}`,
+                        conversation_id: conversationId,
+                        user_id: userId,
+                        role: 'user',
+                        content: '这是一条测试消息',
+                        timestamp: Date.now()
+                    })
+                    .select()
+                    .single();
+
+                if (error) throw error;
+
+                resultDiv.innerHTML = `✅ 消息创建成功！\n\n${JSON.stringify(data, null, 2)}`;
+                resultDiv.parentElement.className = 'test-section';
+            } catch (error) {
+                resultDiv.innerHTML = `❌ 创建消息失败:\n\n${error.message}\n\n详细错误:\n${JSON.stringify(error, null, 2)}`;
+                resultDiv.parentElement.className = 'test-section error';
+            }
+        };
+
+        window.testCreateNote = async function() {
+            const resultDiv = document.getElementById('note-result');
+            resultDiv.style.display = 'block';
+            resultDiv.innerHTML = '⏳ 创建中...';
+            
+            if (!supabase) {
+                resultDiv.innerHTML = '❌ Supabase 客户端未初始化';
+                resultDiv.parentElement.className = 'test-section error';
+                return;
+            }
+
+            try {
+                const conversationId = prompt('请输入对话 ID:') || 'test-conv-123';
+                
+                const { data, error } = await supabase
+                    .from('notes')
+                    .insert({
+                        id: `test-note-${Date.now()}`,
+                        conversation_id: conversationId,
+                        title: '测试笔记',
+                        content: '# 测试笔记内容\n\n这是一个测试笔记。',
+                        x: 100,
+                        y: 100,
+                        updated_at: Date.now()
+                    })
+                    .select()
+                    .single();
+
+                if (error) throw error;
+
+                resultDiv.innerHTML = `✅ 笔记创建成功！\n\n${JSON.stringify(data, null, 2)}`;
+                resultDiv.parentElement.className = 'test-section';
+            } catch (error) {
+                resultDiv.innerHTML = `❌ 创建笔记失败:\n\n${error.message}\n\n详细错误:\n${JSON.stringify(error, null, 2)}`;
+                resultDiv.parentElement.className = 'test-section error';
+            }
+        };
+
+        window.viewAllData = async function() {
+            const resultDiv = document.getElementById('view-result');
+            resultDiv.style.display = 'block';
+            resultDiv.innerHTML = '⏳ 加载中...';
+            
+            if (!supabase) {
+                resultDiv.innerHTML = '❌ Supabase 客户端未初始化';
+                resultDiv.parentElement.className = 'test-section error';
+                return;
+            }
+
+            try {
+                const [conversations, messages, notes] = await Promise.all([
+                    supabase.from('conversations').select('*').limit(10),
+                    supabase.from('messages').select('*').limit(10),
+                    supabase.from('notes').select('*').limit(10)
+                ]);
+
+                const result = {
+                    conversations: {
+                        count: conversations.data?.length || 0,
+                        data: conversations.data,
+                        error: conversations.error
+                    },
+                    messages: {
+                        count: messages.data?.length || 0,
+                        data: messages.data,
+                        error: messages.error
+                    },
+                    notes: {
+                        count: notes.data?.length || 0,
+                        data: notes.data,
+                        error: notes.error
+                    }
+                };
+
+                resultDiv.innerHTML = `📊 数据概览:\n\n${JSON.stringify(result, null, 2)}`;
+                resultDiv.parentElement.className = 'test-section';
+            } catch (error) {
+                resultDiv.innerHTML = `❌ 查询失败:\n\n${error.message}`;
+                resultDiv.parentElement.className = 'test-section error';
+            }
+        };
+    </script>
+</body>
+</html>
+

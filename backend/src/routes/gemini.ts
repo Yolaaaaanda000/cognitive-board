@@ -6,7 +6,7 @@ const router = Router();
 // 流式消息接口
 router.post('/stream', async (req, res) => {
   try {
-    const { message } = req.body;
+    const { message, conversationHistory, thoughtSignature } = req.body;
     
     if (!message || typeof message !== 'string') {
       return res.status(400).json({ error: 'Message is required and must be a string' });
@@ -20,10 +20,35 @@ router.post('/stream', async (req, res) => {
 
     // 流式发送消息
     try {
-      for await (const chunk of sendMessageStreamToGemini(message)) {
-        res.write(`data: ${JSON.stringify({ chunk })}\n\n`);
+      let lastThoughtSignature: string | undefined;
+      
+      for await (const chunk of sendMessageStreamToGemini(
+        message,
+        conversationHistory,
+        thoughtSignature
+      )) {
+        // 保存 Thought Signature（如果存在）
+        if (chunk.thoughtSignature) {
+          lastThoughtSignature = chunk.thoughtSignature;
+        }
+        
+        // 发送文本块和 Thought Signature
+        res.write(`data: ${JSON.stringify({ 
+          chunk: chunk.text || '', 
+          thoughtSignature: chunk.thoughtSignature,
+          done: chunk.done || false
+        })}\n\n`);
       }
-      res.write(`data: ${JSON.stringify({ done: true })}\n\n`);
+      
+      // 如果最后有 Thought Signature，确保发送一次
+      if (lastThoughtSignature) {
+        res.write(`data: ${JSON.stringify({ 
+          thoughtSignature: lastThoughtSignature,
+          done: true 
+        })}\n\n`);
+      } else {
+        res.write(`data: ${JSON.stringify({ done: true })}\n\n`);
+      }
       res.end();
     } catch (error) {
       console.error('Stream error:', error);

@@ -4,13 +4,21 @@
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 
   (import.meta.env.DEV ? '' : 'http://localhost:3001');
 
-export const sendMessageStreamToGemini = async function* (message: string) {
+export const sendMessageStreamToGemini = async function* (
+  message: string,
+  conversationHistory?: Array<{role: string, parts: Array<{text: string}>}>,
+  thoughtSignature?: string
+) {
   const response = await fetch(`${API_BASE_URL}/api/gemini/stream`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
     },
-    body: JSON.stringify({ message }),
+    body: JSON.stringify({ 
+      message,
+      conversationHistory,
+      thoughtSignature
+    }),
   });
 
   if (!response.ok) {
@@ -54,11 +62,21 @@ export const sendMessageStreamToGemini = async function* (message: string) {
         }
         
         if (data.done) {
-          return;
+          // 如果 done 为 true，返回最后的 Thought Signature（如果存在）
+          return {
+            text: '',
+            thoughtSignature: data.thoughtSignature,
+            done: true
+          };
         }
         
-        if (data.chunk) {
-          yield data.chunk;
+        // 返回文本块和 Thought Signature
+        if (data.chunk || data.thoughtSignature) {
+          yield {
+            text: data.chunk || '',
+            thoughtSignature: data.thoughtSignature,
+            done: false
+          };
         }
       }
     }
@@ -85,8 +103,13 @@ export const sendMessageStreamToGemini = async function* (message: string) {
           throw new Error(data.error);
         }
         
-        if (data.chunk) {
-          yield data.chunk;
+        // 返回文本块和 Thought Signature
+        if (data.chunk || data.thoughtSignature) {
+          yield {
+            text: data.chunk || '',
+            thoughtSignature: data.thoughtSignature,
+            done: false
+          };
         }
       }
     }
