@@ -416,29 +416,54 @@ function Workspace({ user, onLogout }: WorkspaceProps) {
     const convs = convList || conversations;
     const conv = convs.find(c => c.id === conversationId);
     
+    console.log('📂 开始加载对话:', conversationId);
+    console.log('   对话列表中的对话:', conv ? '✅ 找到' : '❌ 未找到');
+    
     if (isSupabaseConfigured() && supabase) {
       try {
         // 从数据库加载笔记、消息和文件
+        console.log('🔄 从数据库加载对话数据...');
         const [dbNotes, dbMessages, dbFiles] = await Promise.all([
           import('./services/noteService').then(m => m.fetchNotesForConversation(conversationId)),
           import('./services/messageService').then(m => m.fetchMessagesForConversation(conversationId)),
           import('./services/fileDbService').then(m => m.fetchFilesForConversation(conversationId))
         ]);
 
-        setNotes(dbNotes);
-        setMessages(dbMessages);
+        console.log('📊 数据库加载结果:', {
+          notes: dbNotes.length,
+          messages: dbMessages.length,
+          files: dbFiles.length,
+          aiMessages: dbMessages.filter(m => m.role === 'ai').length,
+          userMessages: dbMessages.filter(m => m.role === 'user').length
+        });
+
+        // 如果数据库返回的数据为空，但对话列表中已有数据，使用对话列表中的数据作为后备
+        const finalNotes = dbNotes.length > 0 ? dbNotes : (conv?.notes || []);
+        const finalMessages = dbMessages.length > 0 ? dbMessages : (conv?.messages || []);
+
+        if (dbNotes.length === 0 && conv?.notes && conv.notes.length > 0) {
+          console.warn('⚠️ 数据库返回空笔记，使用对话列表中的笔记作为后备:', conv.notes.length);
+        }
+        if (dbMessages.length === 0 && conv?.messages && conv.messages.length > 0) {
+          console.warn('⚠️ 数据库返回空消息，使用对话列表中的消息作为后备:', conv.messages.length);
+        }
+
+        setNotes(finalNotes);
+        setMessages(finalMessages);
         setUploadedFiles(dbFiles);
         setActiveConversationId(conversationId);
         setThoughtSignature(undefined); // 切换对话时重置 Thought Signature
         
-        if (dbNotes.length > 0) {
-          setActiveNoteId(dbNotes[0].id);
+        if (finalNotes.length > 0) {
+          setActiveNoteId(finalNotes[0].id);
         } else {
           createDefaultNote();
         }
+        
+        console.log('✅ 对话加载完成');
       } catch (error) {
-        console.error('Error loading conversation from database:', error);
-        // 降级到 localStorage
+        console.error('❌ Error loading conversation from database:', error);
+        // 降级到使用对话列表中的数据
         loadLocalConversation(conversationId, convs);
       }
     } else {

@@ -6,9 +6,11 @@ export async function fetchNotesForConversation(
   conversationId: string
 ): Promise<Note[]> {
   if (!isSupabaseConfigured() || !supabase) {
+    console.warn('⚠️ fetchNotesForConversation: Supabase 未配置');
     return []
   }
 
+  console.log('🔄 从数据库获取笔记，对话 ID:', conversationId);
   const { data, error } = await supabase
     .from('notes')
     .select('*')
@@ -16,11 +18,12 @@ export async function fetchNotesForConversation(
     .order('updated_at', { ascending: false })
 
   if (error) {
-    console.error('Error fetching notes:', error)
+    console.error('❌ Error fetching notes:', error)
+    console.error('   错误详情:', JSON.stringify(error, null, 2));
     return [] // 降级：返回空数组而不是抛出错误
   }
 
-  return (data || []).map(n => ({
+  const notes = (data || []).map(n => ({
     id: n.id,
     title: n.title,
     content: n.content,
@@ -29,6 +32,9 @@ export async function fetchNotesForConversation(
     parentId: n.parent_id,
     updatedAt: new Date(n.updated_at).getTime()
   }))
+
+  console.log(`✅ 成功获取笔记，数量: ${notes.length}`);
+  return notes
 }
 
 // 创建笔记

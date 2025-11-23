@@ -29,10 +29,13 @@ export async function fetchConversations(userId: string): Promise<Conversation[]
   // 需要加载每个对话的 notes 和 messages
   const conversations: Conversation[] = []
   for (const conv of data || []) {
+    console.log(`🔄 加载对话 "${conv.title}" (${conv.id}) 的笔记和消息...`);
     const [notes, messages] = await Promise.all([
       fetchNotesForConversation(conv.id),
       fetchMessagesForConversation(conv.id)
     ])
+    
+    console.log(`✅ 对话 "${conv.title}": 笔记 ${notes.length} 个，消息 ${messages.length} 个 (AI: ${messages.filter(m => m.role === 'ai').length}, 用户: ${messages.filter(m => m.role === 'user').length})`);
     
     conversations.push({
       id: conv.id,
@@ -44,6 +47,7 @@ export async function fetchConversations(userId: string): Promise<Conversation[]
     })
   }
 
+  console.log(`✅ 所有对话加载完成，共 ${conversations.length} 个对话`);
   return conversations
 }
 

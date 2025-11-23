@@ -6,9 +6,11 @@ export async function fetchMessagesForConversation(
   conversationId: string
 ): Promise<Message[]> {
   if (!isSupabaseConfigured() || !supabase) {
+    console.warn('⚠️ fetchMessagesForConversation: Supabase 未配置');
     return []
   }
 
+  console.log('🔄 从数据库获取消息，对话 ID:', conversationId);
   const { data, error } = await supabase
     .from('messages')
     .select('*')
@@ -16,11 +18,12 @@ export async function fetchMessagesForConversation(
     .order('timestamp', { ascending: true })
 
   if (error) {
-    console.error('Error fetching messages:', error)
+    console.error('❌ Error fetching messages:', error)
+    console.error('   错误详情:', JSON.stringify(error, null, 2));
     return []
   }
 
-  return (data || []).map(m => ({
+  const messages = (data || []).map(m => ({
     id: m.id,
     role: m.role as 'user' | 'ai',
     agent: m.agent as any,
@@ -30,6 +33,9 @@ export async function fetchMessagesForConversation(
     timestamp: m.timestamp,
     isStreaming: m.is_streaming || false
   }))
+
+  console.log(`✅ 成功获取消息，数量: ${messages.length}，AI消息: ${messages.filter(m => m.role === 'ai').length}，用户消息: ${messages.filter(m => m.role === 'user').length}`);
+  return messages
 }
 
 // 创建消息
